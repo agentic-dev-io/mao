@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP Agent Orchestra - A modern framework for orchestrating AI agents"
 readme = "README.md"
 authors = [
-    { name = "Björn Bethge", email = "bjoern.bethge@gmail.com" }
+    { name = "Björn Bethge", email = "" }
 ]
 requires-python = ">=3.11"
 dependencies = [
