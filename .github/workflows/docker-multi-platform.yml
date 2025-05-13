@@ -12,56 +12,79 @@ on:
         default: 'linux/amd64,linux/arm64'
         type: string
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   multi-platform-build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout code
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Set up Docker tags
+        run: |
+          # Extract repository name
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d '/' -f 2)
+          
+          # Set up tags based on event type
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+            TAGS="ghcr.io/${{ github.repository }}:${VERSION}"
+            # Add additional tags for semver
+            if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              MAJOR=$(echo $VERSION | cut -d. -f1)
+              MINOR=$(echo $VERSION | cut -d. -f2)
+              TAGS="$TAGS,ghcr.io/${{ github.repository }}:${MAJOR}.${MINOR}"
+            fi
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAGS="ghcr.io/${{ github.repository }}:latest"
+          else
+            BRANCH=$(echo ${GITHUB_REF#refs/heads/} | sed -r 's/[\/]/-/g')
+            TAGS="ghcr.io/${{ github.repository }}:${BRANCH}"
+          fi
+          
+          # Add SHA tag
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAGS="$TAGS,ghcr.io/${{ github.repository }}:sha-${SHA_SHORT}"
+          
+          echo "TAGS=${TAGS}" >> $GITHUB_ENV
+          echo "Using tags: ${TAGS}"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        run: |
+          docker buildx create --name mybuilder --use
+          docker buildx inspect --bootstrap
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/Dockerfile.api
-          platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-            QDRANT_URL=${{ secrets.QDRANT_URL }}
-            EMBEDDING_MODEL=${{ secrets.EMBEDDING_MODEL }}
-            MCP_DB_PATH=${{ secrets.MCP_DB_PATH }}
-            MCP_CONFIG_PATH=${{ secrets.MCP_CONFIG_PATH }}
-            OLLAMA_HOST=${{ secrets.OLLAMA_HOST }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max 
+        run: |
+          PLATFORMS="${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          
+          docker buildx build \
+            --platform ${PLATFORMS} \
+            --push \
+            --tag $(echo $TAGS | tr ',' ' --tag ') \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
+            --build-arg ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }} \
+            --build-arg QDRANT_URL=${{ secrets.QDRANT_URL }} \
+            --build-arg EMBEDDING_MODEL=${{ secrets.EMBEDDING_MODEL }} \
+            --build-arg MCP_DB_PATH=${{ secrets.MCP_DB_PATH }} \
+            --build-arg MCP_CONFIG_PATH=${{ secrets.MCP_CONFIG_PATH }} \
+            --build-arg OLLAMA_HOST=${{ secrets.OLLAMA_HOST }} \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -f ./docker/Dockerfile.api \
+            . 
