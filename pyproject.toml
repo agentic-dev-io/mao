@@ -1,0 +1,20 @@
+[project]
+name = "torch-template"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Björn Bethge", email = "bjoern.bethge@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+python-preference = "only-managed"
+python-downloads = "automatic"
+link-mode = "copy"
+compile-bytecode = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
