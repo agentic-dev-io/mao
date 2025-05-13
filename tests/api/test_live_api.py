@@ -1,6 +1,6 @@
 """
-Tests für die MCP Agents API mit einem echten laufenden Server.
-Diese Tests verwenden einen realen HTTP-Server für eine realistischere Testumgebung.
+Tests for the MCP Agents API with a real running server.
+These tests use a real HTTP server for a more realistic test environment.
 """
 
 import httpx
@@ -27,7 +27,7 @@ def test_health_endpoint_live(live_api_server):
 def test_create_and_get_agent_live(live_api_server):
     """Test creating and retrieving an agent with a live server."""
     with httpx.Client(base_url=live_api_server, timeout=10.0) as client:
-        # Erstelle einen Agenten
+        # Create an agent
         agent_name = generate_unique_name("LiveAgent")
         agent_data = {
             "name": agent_name,
@@ -46,7 +46,7 @@ def test_create_and_get_agent_live(live_api_server):
 
         agent_id = created_agent["id"]
 
-        # Hole den erstellten Agenten
+        # Get the created agent
         get_response = client.get(f"/agents/{agent_id}")
         assert get_response.status_code == 200
 
@@ -58,7 +58,7 @@ def test_create_and_get_agent_live(live_api_server):
 def test_server_crud_operations_live(live_api_server):
     """Test CRUD operations for servers with a live server."""
     with httpx.Client(base_url=live_api_server, timeout=10.0) as client:
-        # Erstelle einen Server
+        # Create a server
         server_name = generate_unique_name("LiveServer")
         server_data = {
             "name": server_name,
@@ -74,7 +74,7 @@ def test_server_crud_operations_live(live_api_server):
         created_server = create_response.json()
         server_id = created_server["id"]
 
-        # Update den Server
+        # Update the server
         update_data = {"name": f"{server_name}_updated", "enabled": False}
 
         update_response = client.put(f"/mcp/servers/{server_id}", json=update_data)
@@ -84,19 +84,19 @@ def test_server_crud_operations_live(live_api_server):
         assert updated_server["name"] == update_data["name"]
         assert updated_server["enabled"] == update_data["enabled"]
 
-        # Liste alle Server auf
+        # List all servers
         list_response = client.get("/mcp/servers")
         assert list_response.status_code == 200
 
         servers = list_response.json()
         found = any(s["id"] == server_id for s in servers)
-        assert found, "Der Server wurde nicht in der Liste gefunden"
+        assert found, "The server was not found in the list"
 
-        # Lösche den Server
+        # Delete the server
         delete_response = client.delete(f"/mcp/servers/{server_id}")
         assert delete_response.status_code == 204
 
-        # Versuche, den gelöschten Server abzurufen
+        # Try to get the deleted server
         get_response = client.get(f"/mcp/servers/{server_id}")
         assert get_response.status_code == 404
 
@@ -104,7 +104,7 @@ def test_server_crud_operations_live(live_api_server):
 def test_mcp_config_endpoint_live(live_api_server):
     """Test the MCP configuration endpoint with a live server."""
     with httpx.Client(base_url=live_api_server, timeout=10.0) as client:
-        # Erstelle einen Server für die Konfiguration
+        # Create a server for the configuration
         server_name = generate_unique_name("ConfigServer")
         server_data = {
             "name": server_name,
@@ -115,7 +115,7 @@ def test_mcp_config_endpoint_live(live_api_server):
 
         client.post("/mcp/servers", json=server_data)
 
-        # Hole die MCP-Konfiguration
+        # Get the MCP configuration
         config_response = client.get("/mcp/config")
         assert config_response.status_code == 200
 

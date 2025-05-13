@@ -8,7 +8,7 @@ def test_create_team(api_test_client):
     """Test creating a new team."""
     client, _ = api_test_client
 
-    # Testdaten für die Team-Erstellung
+    # Test data for team creation
     team_data = {
         "name": "Test Research Team",
         "description": "A team for testing team functionality",
