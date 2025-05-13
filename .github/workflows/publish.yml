@@ -18,13 +18,17 @@ jobs:
       id-token: write  # For trusted publishing to PyPI
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout code
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3.11 python3.11-dev python3.11-venv
+          sudo ln -sf /usr/bin/python3.11 /usr/bin/python
+          python --version
 
       - name: Install uv
         run: |
@@ -51,4 +55,8 @@ jobs:
         run: uv run python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1 
+        run: |
+          # Create PyPI API token configuration
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade twine
+          python -m twine upload dist/* 

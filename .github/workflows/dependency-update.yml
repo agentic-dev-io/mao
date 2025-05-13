@@ -13,13 +13,17 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout code
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3.11 python3.11-dev python3.11-venv
+          sudo ln -sf /usr/bin/python3.11 /usr/bin/python
+          python --version
 
       - name: Install uv
         run: |
@@ -48,14 +52,28 @@ jobs:
 
       - name: Create Pull Request
         if: steps.update.outputs.changes == 'true'
-        uses: peter-evans/create-pull-request@v5
-        with:
-          commit-message: 'chore: update dependencies'
-          title: 'chore: update dependencies'
-          body: |
-            This PR updates project dependencies to their latest compatible versions.
-            
-            Updated automatically by the Dependency Update workflow.
-          branch: dependency-update
-          delete-branch: true
-          labels: dependencies 
+        run: |
+          # Configure git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Create a new branch
+          BRANCH="dependency-update"
+          git checkout -b $BRANCH
+          
+          # Commit changes
+          git add uv.lock
+          git commit -m "chore: update dependencies"
+          
+          # Push to remote
+          git push -f origin $BRANCH
+          
+          # Create PR using GitHub CLI
+          gh pr create \
+            --title "chore: update dependencies" \
+            --body "This PR updates project dependencies to their latest compatible versions.\n\nUpdated automatically by the Dependency Update workflow." \
+            --label "dependencies" \
+            --base main \
+            --head $BRANCH
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
