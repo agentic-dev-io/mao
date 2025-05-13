@@ -5,12 +5,35 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:  # Enable manual triggering
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+          - 6334:6334
+      
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+    
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      QDRANT_URL: http://localhost:6333
+      EMBEDDING_MODEL: text-embedding-3-small
+      MCP_DB_PATH: ./data/mcp_config.duckdb
+      MCP_CONFIG_PATH: ./mcp.json
+      OLLAMA_HOST: http://localhost:11434
+    
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -21,6 +44,9 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      
+      - name: Create data directory
+        run: mkdir -p data
           
       - name: Install dependencies
         run: uv sync
@@ -33,6 +59,13 @@ jobs:
         
       - name: Type check with mypy
         run: uv run mypy .
+      
+      - name: Wait for services
+        run: |
+          # Wait for Qdrant to be ready
+          timeout 60s bash -c 'until curl -s http://localhost:6333/health; do sleep 1; done'
+          # Wait for Ollama to be ready (may take longer to initialize)
+          timeout 120s bash -c 'until curl -s http://localhost:11434/api/version; do sleep 2; done'
         
       - name: Test with pytest
         run: uv run pytest --cov=src tests/
