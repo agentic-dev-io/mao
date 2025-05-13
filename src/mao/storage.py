@@ -1,6 +1,5 @@
 """
 KnowledgeTree and ExperienceTree: Qdrant-based vector stores for agent knowledge and experience.
-Production-ready, typed, DRY. All docstrings in English.
 """
 
 from typing import List, Dict, Any, Optional, Tuple, TypedDict, AsyncGenerator, TypeVar, Generic, cast, Protocol, Callable, Type
