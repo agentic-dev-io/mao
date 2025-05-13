@@ -5,6 +5,9 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
+      # Enable BuildKit for cache mounts
+      args:
+        BUILDKIT_INLINE_CACHE: 1
     ports:
       - "8000:8000"
     environment:
