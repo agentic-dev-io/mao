@@ -24,7 +24,6 @@ from qdrant_client.http.exceptions import (
 )
 
 # OpenAI embeddings with batched requests, async API and dimensions parameter
-from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain.schema.embeddings import Embeddings
 from tenacity import (
@@ -58,27 +57,7 @@ class EmbeddingProvider:
     @staticmethod
     async def create_embeddings() -> Tuple[Embeddings, int]:
         """Create embedding model and return it with its dimension"""
-        # First try OpenAI models (most reliable dimensions)
-        try:
-            if "text-embedding-3" in EMBED_MODEL:
-                openai_embed: Embeddings = OpenAIEmbeddings(
-                    model=EMBED_MODEL, dimensions=1536
-                )
-                if (
-                    hasattr(openai_embed, "dimensions")
-                    and getattr(openai_embed, "dimensions") is not None
-                ):
-                    embed_dim = int(getattr(openai_embed, "dimensions"))
-                else:
-                    embed_dim = 1536
-                logging.info(
-                    f"Using OpenAI embeddings: {EMBED_MODEL} with dimensions {embed_dim}"
-                )
-                return openai_embed, embed_dim
-        except Exception as e:
-            logging.info(f"Could not use OpenAI embeddings: {e}")
 
-        # Finally try FastEmbed
         try:
             fast_embed: Embeddings = FastEmbedEmbeddings(
                 model_name="BAAI/bge-small-en-v1.5", parallel=0
@@ -147,7 +126,7 @@ class VectorStoreBase:
         """Async initialization method"""
         self.embed, self.embed_dim = await self._embedding_provider()
         # Ensure collection exists
-        await self._ensure_collection_async()
+        await self._ensure_collection()
         logging.info(
             f"{self.__class__.__name__}: Using embedding dim {self.embed_dim} "
             f"for collection '{self.collection_name}' at {self.qdrant_url}"
@@ -170,7 +149,7 @@ class VectorStoreBase:
         )
         return await instance.async_init()
 
-    async def _ensure_collection_async(self) -> None:
+    async def _ensure_collection(self) -> None:
         """Ensure collection exists with correct vector dimension"""
         try:
             collections = await self.async_client.get_collections()
@@ -228,90 +207,6 @@ class VectorStoreBase:
                     f"Collection '{self.collection_name}' does not exist. Creating now with dim {self.embed_dim}."
                 )
                 await self.async_client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config={
-                        self.vector_name: VectorParams(
-                            size=self.embed_dim if self.embed_dim is not None else 1536,
-                            distance=Distance.COSINE,
-                        )
-                    },
-                )
-            logging.info(
-                f"Collection '{self.collection_name}' is ready with target dim {self.embed_dim}."
-            )
-        except Exception as e:
-            logging.error(
-                f"Error during collection setup for '{self.collection_name}': {e}"
-            )
-            raise QdrantOperationError(
-                f"Failed to ensure collection '{self.collection_name}': {e}"
-            ) from e
-
-    def _ensure_collection(self) -> None:
-        """Synchronous wrapper for _ensure_collection_async"""
-        # This is only used for backward compatibility in the old __init__
-        if self.embed is None or self.embed_dim is None:
-            # Initialize embeddings synchronously if needed
-            self.embed, self.embed_dim = asyncio.run(
-                EmbeddingProvider.create_embeddings()
-            )
-
-        try:
-            collections = self.client.get_collections().collections
-            collection_names = [c.name for c in collections]
-            exists = self.collection_name in collection_names
-
-            if exists:
-                info = self.client.get_collection(self.collection_name)
-                vectors_cfg = info.config.params.vectors
-                col_dim = None
-
-                if isinstance(vectors_cfg, dict) and self.vector_name in vectors_cfg:
-                    v = vectors_cfg[self.vector_name]
-                    if isinstance(v, VectorParams):
-                        col_dim = v.size
-                    else:
-                        col_dim = None
-                elif hasattr(vectors_cfg, "size"):
-                    s = getattr(vectors_cfg, "size", None)
-                    if isinstance(s, int):
-                        col_dim = s
-                    else:
-                        col_dim = None
-
-                if col_dim is None:
-                    logging.warning(
-                        f"Could not determine vector dimension for existing collection "
-                        f"'{self.collection_name}'. Assuming compatible."
-                    )
-                elif col_dim != self.embed_dim:
-                    msg = f"Collection '{self.collection_name}' has dimension {col_dim}, but model expects {self.embed_dim}."
-                    if self.recreate_on_dim_mismatch:
-                        logging.warning(
-                            f"{msg} RECREATING collection based on recreate_on_dim_mismatch=True."
-                        )
-                        self.client.recreate_collection(
-                            collection_name=self.collection_name,
-                            vectors_config={
-                                self.vector_name: VectorParams(
-                                    size=(
-                                        self.embed_dim
-                                        if self.embed_dim is not None
-                                        else 1536
-                                    ),
-                                    distance=Distance.COSINE,
-                                )
-                            },
-                        )
-                    else:
-                        logging.error(
-                            f"{msg} NOT recreating automatically. Manual intervention may be required."
-                        )
-            else:
-                logging.info(
-                    f"Collection '{self.collection_name}' does not exist. Creating now with dim {self.embed_dim}."
-                )
-                self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config={
                         self.vector_name: VectorParams(
