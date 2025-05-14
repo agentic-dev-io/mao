@@ -96,8 +96,7 @@ async def mcp_client():
 
         yield client
     finally:
-        if client:
-            await client.async_shutdown()
+        pass
 
 
 @pytest.fixture(scope="function")
