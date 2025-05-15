@@ -18,7 +18,7 @@ def test_create_server(api_test_client):
     """Test creating a new server."""
     client, _ = api_test_client
 
-    # Testdaten für die Server-Erstellung mit eindeutigem Namen
+    # Test data for server creation with unique name
     server_name = generate_unique_name("TestServer")
     server_data = {
         "name": server_name,
@@ -47,7 +47,7 @@ def test_list_servers(api_test_client):
     """Test listing all servers."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Server mit eindeutigem Namen
+    # Create a server first with a unique name
     server_name = generate_unique_name("ServerList")
     server_data = {
         "name": server_name,
@@ -59,7 +59,7 @@ def test_list_servers(api_test_client):
     create_response = client.post("/mcp/servers", json=server_data)
     assert create_response.status_code == 201
 
-    # Hole die Liste aller Server
+    # Get the list of all servers
     list_response = client.get("/mcp/servers")
     assert list_response.status_code == 200
 
@@ -67,21 +67,21 @@ def test_list_servers(api_test_client):
     assert isinstance(servers, list)
     assert len(servers) >= 1
 
-    # Finde den erstellten Server in der Liste
+    # Find the created server in the list
     found = False
     for server in servers:
         if server["name"] == server_data["name"]:
             found = True
             break
 
-    assert found, "Der erstellte Server wurde nicht in der Liste gefunden"
+    assert found, "Created server was not found in the list"
 
 
 def test_create_tool(api_test_client):
     """Test creating a new tool."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Server für den Tool mit eindeutigem Namen
+    # Create a server first for the tool with a unique name
     server_name = generate_unique_name("ServerForTool")
     server_data = {"name": server_name, "transport": "stdio", "enabled": True}
 
@@ -89,7 +89,7 @@ def test_create_tool(api_test_client):
     assert server_response.status_code == 201
     server_id = server_response.json()["id"]
 
-    # Testdaten für die Tool-Erstellung
+    # Test data for tool creation
     tool_data = {
         "name": "Test Tool",
         "enabled": True,
@@ -118,7 +118,7 @@ def test_list_tools(api_test_client):
     """Test listing all tools."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Server mit eindeutigem Namen
+    # Create a server first with a unique name
     server_name = generate_unique_name("ToolListServer")
     server_data = {"name": server_name, "transport": "stdio", "enabled": True}
 
@@ -126,13 +126,13 @@ def test_list_tools(api_test_client):
     assert server_response.status_code == 201
     server_id = server_response.json()["id"]
 
-    # Erstelle ein Tool
+    # Create a tool
     tool_data = {"name": "Test Tool for List", "enabled": True, "server_id": server_id}
 
     create_response = client.post("/mcp/tools", json=tool_data)
     assert create_response.status_code == 201
 
-    # Hole die Liste aller Tools
+    # Get the list of all tools
     list_response = client.get("/mcp/tools")
     assert list_response.status_code == 200
 
@@ -140,16 +140,16 @@ def test_list_tools(api_test_client):
     assert isinstance(tools, list)
     assert len(tools) >= 1
 
-    # Finde das erstellte Tool in der Liste
+    # Find the created tool in the list
     found = False
     for tool in tools:
         if tool["name"] == tool_data["name"]:
             found = True
             break
 
-    assert found, "Das erstellte Tool wurde nicht in der Liste gefunden"
+    assert found, "Created tool was not found in the list"
 
-    # Teste das Filtern nach Server-ID
+    # Test filtering by server ID
     filtered_response = client.get(f"/mcp/tools?server_id={server_id}")
     assert filtered_response.status_code == 200
 
@@ -162,7 +162,7 @@ def test_get_mcp_config(api_test_client):
     """Test getting MCP configuration."""
     client, _ = api_test_client
 
-    # Erstelle einen Server für die Konfiguration mit eindeutigem Namen
+    # Create a server for the configuration with a unique name
     server_name = generate_unique_name("ConfigServer")
     server_data = {
         "name": server_name,
@@ -175,7 +175,7 @@ def test_get_mcp_config(api_test_client):
     server_response = client.post("/mcp/servers", json=server_data)
     assert server_response.status_code == 201
 
-    # Teste den Konfigurations-Endpunkt
+    # Test the configuration endpoint
     config_response = client.get("/mcp/config")
     assert config_response.status_code == 200
 
@@ -188,7 +188,7 @@ def test_assign_tool_to_agent(api_test_client):
     """Test assigning a tool to an agent."""
     client, _ = api_test_client
 
-    # Erstelle einen Agenten
+    # Create an agent
     agent_data = {
         "name": "Tool Assignment Test Agent",
         "provider": "anthropic",
@@ -199,7 +199,7 @@ def test_assign_tool_to_agent(api_test_client):
     assert agent_response.status_code == 201
     agent_id = agent_response.json()["id"]
 
-    # Erstelle einen Server mit eindeutigem Namen
+    # Create a server with a unique name
     server_name = generate_unique_name("ToolAssignmentServer")
     server_data = {"name": server_name, "transport": "stdio", "enabled": True}
 
@@ -207,7 +207,7 @@ def test_assign_tool_to_agent(api_test_client):
     assert server_response.status_code == 201
     server_id = server_response.json()["id"]
 
-    # Erstelle ein Tool
+    # Create a tool
     tool_data = {
         "name": "Tool for Assignment Test",
         "enabled": True,
@@ -218,7 +218,7 @@ def test_assign_tool_to_agent(api_test_client):
     assert tool_response.status_code == 201
     tool_id = tool_response.json()["id"]
 
-    # Weise das Tool dem Agenten zu
+    # Assign the tool to the agent
     assignment_data = {"enabled": True}
 
     assignment_response = client.post(
@@ -226,7 +226,7 @@ def test_assign_tool_to_agent(api_test_client):
     )
     assert assignment_response.status_code == 204
 
-    # Prüfe, ob das Tool in der Liste der Tools des Agenten ist
+    # Check if the tool is in the agent's tool list
     agent_tools_response = client.get(f"/agents/{agent_id}/tools")
     assert agent_tools_response.status_code == 200
 
@@ -234,7 +234,7 @@ def test_assign_tool_to_agent(api_test_client):
     assert isinstance(agent_tools, list)
     assert len(agent_tools) >= 1
 
-    # Finde das zugewiesene Tool in der Liste
+    # Find the assigned tool in the list
     found = False
     for tool in agent_tools:
         if tool["id"] == tool_id:
@@ -242,15 +242,13 @@ def test_assign_tool_to_agent(api_test_client):
             assert tool["enabled"] == assignment_data["enabled"]
             break
 
-    assert (
-        found
-    ), "Das zugewiesene Tool wurde nicht in der Liste der Tools des Agenten gefunden"
+    assert found, "Assigned tool was not found in the agent's tool list"
 
-    # Entferne das Tool vom Agenten
+    # Remove the tool from the agent
     remove_response = client.delete(f"/mcp/tools/agent/{agent_id}/tool/{tool_id}")
     assert remove_response.status_code == 204
 
-    # Prüfe, ob das Tool nicht mehr in der Liste der Tools des Agenten ist
+    # Check that the tool is no longer in the agent's tool list
     agent_tools_response_after = client.get(f"/agents/{agent_id}/tools")
     assert agent_tools_response_after.status_code == 200
 
@@ -261,13 +259,13 @@ def test_assign_tool_to_agent(api_test_client):
             not_found = False
             break
 
-    assert not_found, "Das Tool wurde nicht erfolgreich vom Agenten entfernt"
+    assert not_found, "Tool was not successfully removed from the agent"
 
 
 def test_server_tool_lifecycle_with_live_server(live_api_server):
     """Test complete server and tool lifecycle with a live server."""
     with httpx.Client(base_url=live_api_server, timeout=10.0) as client:
-        # 1. Erstelle einen Server
+        # 1. Create a server
         server_name = generate_unique_name("LiveServer")
         server_data = {
             "name": server_name,
@@ -282,7 +280,7 @@ def test_server_tool_lifecycle_with_live_server(live_api_server):
         server = server_response.json()
         server_id = server["id"]
 
-        # 2. Erstelle ein Tool für den Server
+        # 2. Create a tool for the server
         tool_name = generate_unique_name("LiveTool")
         tool_data = {
             "name": tool_name,
@@ -302,7 +300,7 @@ def test_server_tool_lifecycle_with_live_server(live_api_server):
         tool = tool_response.json()
         tool_id = tool["id"]
 
-        # 3. Erstelle einen Agenten
+        # 3. Create an agent
         agent_data = {
             "name": generate_unique_name("LiveAgent"),
             "provider": "openai",
@@ -314,41 +312,41 @@ def test_server_tool_lifecycle_with_live_server(live_api_server):
         agent = agent_response.json()
         agent_id = agent["id"]
 
-        # 4. Weise das Tool dem Agenten zu
+        # 4. Assign the tool to the agent
         assignment_data = {"enabled": True}
         assignment_response = client.post(
             f"/mcp/tools/agent/{agent_id}/tool/{tool_id}", json=assignment_data
         )
         assert assignment_response.status_code == 204
 
-        # 5. Hole die Tool-Liste des Agenten
+        # 5. Get the agent's tool list
         agent_tools_response = client.get(f"/agents/{agent_id}/tools")
         assert agent_tools_response.status_code == 200
         tools = agent_tools_response.json()
         assert any(t["id"] == tool_id for t in tools)
 
-        # 6. Hole die MCP-Konfiguration
+        # 6. Get the MCP configuration
         config_response = client.get("/mcp/config")
         assert config_response.status_code == 200
         config = config_response.json()
         assert "mcpServers" in config
         assert server_name in config["mcpServers"]
 
-        # 7. Lösche die Ressourcen
-        # Entferne Tool-Zuweisung
+        # 7. Clean up the resources
+        # Remove tool assignment
         remove_tool_response = client.delete(
             f"/mcp/tools/agent/{agent_id}/tool/{tool_id}"
         )
         assert remove_tool_response.status_code == 204
 
-        # Lösche Tool
+        # Delete tool
         delete_tool_response = client.delete(f"/mcp/tools/{tool_id}")
         assert delete_tool_response.status_code == 204
 
-        # Lösche Server
+        # Delete server
         delete_server_response = client.delete(f"/mcp/servers/{server_id}")
         assert delete_server_response.status_code == 204
 
-        # Lösche Agent
+        # Delete agent
         delete_agent_response = client.delete(f"/agents/{agent_id}")
         assert delete_agent_response.status_code == 204

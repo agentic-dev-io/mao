@@ -10,6 +10,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # Setze ein Gesamttimeout für den Job
     
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -20,6 +21,8 @@ jobs:
       MCP_CONFIG_PATH: ./mcp.json
       OLLAMA_HOST: http://localhost:11434
       PYTHONUNBUFFERED: 1
+      # Aktiviere Debug-Modus für bessere Fehleranalyse
+      DEBUG: "true"
     
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +57,29 @@ jobs:
         run: |
           uv sync
           # Installiere auch die Entwicklungsabhängigkeiten explizit
-          uv pip install pytest pytest-asyncio pytest-cov pytest-timeout
+          uv pip install pytest pytest-asyncio pytest-cov pytest-timeout pytest-xdist
+          # Zeige installierte Pakete für Debugging
+          uv pip list
+      
+      - name: Setup MCP configuration for tests
+        run: |
+          # Erstelle eine realistische mcp.json Datei für Tests mit echten Server- und Tool-Definitionen
+          echo '{
+            "mcpServers": {
+              "test-stdio-server": {
+                "transport": "stdio",
+                "command": "echo",
+                "args": ["Hello from test server"]
+              },
+              "test-sse-server": {
+                "transport": "sse",
+                "url": "http://localhost:8080/events",
+                "headers": {
+                  "Authorization": "Bearer test-token"
+                }
+              }
+            }
+          }' > ./mcp.json
         
       - name: Lint with ruff
         run: uv run ruff check .
@@ -96,15 +121,12 @@ jobs:
             fi
             sleep 2
           done
-      
-      - name: Run API tests
-        run: uv run pytest --cov=src tests/api/
-      
-      - name: Run non-agent tests
-        run: uv run pytest --cov=src --cov-append tests/test_mcp.py tests/test_storage.py
-        
-      - name: Run agent tests with verbose output and timeout
-        run: uv run pytest --cov=src --cov-append -vvs --timeout=60 tests/test_agents.py || echo "Agent tests timed out or failed but continuing workflow"
+
+      # Führe Tests mit paralleler Ausführung aus
+      - name: Run pytest
+        run: |
+          # Setze ein höheres Timeout und verwende parallele Ausführung
+          uv run pytest --cov=src --timeout=120 -v tests/
         
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

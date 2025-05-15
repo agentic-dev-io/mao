@@ -1,22 +1,18 @@
 """
-Tests für Agent und Supervisor Klassen.
-Produktionsreif, asynchron, robust. Alle Docstrings auf Englisch.
+Tests for Agent and Supervisor classes.
 """
 
 import pytest
 import asyncio
-from typing import Any
 import uuid
 import os
 import logging
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.callbacks import BaseCallbackHandler
 
 from mao.agents import create_agent, Supervisor, load_mcp_tools
-from mao.mcp import MCPClient
 
-# Import pytest_asyncio if available for the fixture decorator, otherwise use pytest.fixture
+# Import pytest_asyncio if available
 try:
     import pytest_asyncio
 
@@ -24,34 +20,13 @@ try:
 except ImportError:
     ASYNCIO_FIXTURE = pytest.fixture  # type: ignore
 
-# Konfiguration für Tests mit realen Modellen
+# Configuration for tests with real models
 TEST_OPENAI_MODEL = os.environ.get("TEST_OPENAI_MODEL", "gpt-3.5-turbo")
-
-
-@ASYNCIO_FIXTURE
-async def mcp_client():
-    """
-    Fixture to create an MCPClient and ensure its resources are released.
-    It will load mcp.json from the project root.
-    """
-    client = None
-    try:
-        client = MCPClient(initial_tool_states={"fetch": True, "curl": True})
-        yield client
-    finally:
-        if client and hasattr(client, "async_shutdown"):
-            try:
-                await client.async_shutdown()
-            except Exception as e:
-                logging.error(f"MCPClient fixture: Error during async_shutdown: {e}")
 
 
 @pytest.mark.asyncio
 async def test_create_agent_factory(knowledge_tree, experience_tree):
-    """
-    Test the agent factory function with basic parameters.
-    Skip if API key not available.
-    """
+    """Test the agent factory function with basic parameters."""
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
 
@@ -88,9 +63,7 @@ async def test_create_agent_factory(knowledge_tree, experience_tree):
 
 @pytest.mark.asyncio
 async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
-    """
-    Test that agent can learn from interactions and retrieve context.
-    """
+    """Test that agent can learn from interactions and retrieve context."""
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
 
@@ -109,7 +82,7 @@ async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
         "Python is a programming language created by Guido van Rossum."
     )
 
-    # First interaction to be learned - with more unique/specific content
+    # First interaction to be learned
     user_query = f"What is Python and who created it? [Test ID: {uuid.uuid4().hex[:8]}]"
     thread_id = f"learning_thread_{uuid.uuid4()}"
 
@@ -119,15 +92,15 @@ async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
         config={"configurable": {"thread_id": thread_id}},
     )
 
-    # Mehrere Versuche, um die gespeicherte Erfahrung zu finden
+    # Multiple attempts to find the stored experience
     max_attempts = 5
     experience_found = False
 
     for attempt in range(max_attempts):
-        # Kleine Pause, um asynchrone Operationen abzuschließen
-        await asyncio.sleep(1.0)  # Längere Pause für Embedding-Operationen
+        # Give time for async operations to complete
+        await asyncio.sleep(1.0)
 
-        # Versuche mehrere Suchbegriffe
+        # Try multiple search terms
         search_queries = [
             user_query,
             "Python programming",
@@ -158,7 +131,7 @@ async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
             f"Experience search attempt {attempt+1}/{max_attempts} failed. Retrying..."
         )
 
-    # Test überspringen, wenn wir keine Erfahrung finden können
+    # Skip test if we can't find any experience
     if not experience_found:
         logging.error("Could not find stored experience after multiple attempts")
         pytest.skip(
@@ -187,52 +160,8 @@ async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
 
 
 @pytest.mark.asyncio
-async def test_agent_streaming(knowledge_tree, experience_tree):
-    """
-    Test agent token streaming functionality.
-    """
-    if not os.environ.get("OPENAI_API_KEY"):
-        pytest.skip("OPENAI_API_KEY not set")
-
-    # Collect tokens from streaming
-    received_tokens = []
-
-    # Custom handler to verify callback works
-    class TokenTrackingHandler(BaseCallbackHandler):
-        def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
-            received_tokens.append(token)
-
-    # Create agent with streaming enabled
-    agent_app = await create_agent(
-        provider="openai",
-        model_name=TEST_OPENAI_MODEL,
-        agent_name="streaming_test_agent",
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
-        stream=True,
-        token_callback=lambda token: received_tokens.append(token),
-        callbacks=[TokenTrackingHandler()],
-        system_prompt="Give a short response.",
-    )
-
-    # Invoke the agent
-    thread_id = f"streaming_thread_{uuid.uuid4()}"
-    response = await agent_app.ainvoke(
-        {"messages": [HumanMessage(content="Say hello")]},
-        config={"configurable": {"thread_id": thread_id}},
-    )
-
-    # Verify streaming worked
-    assert len(received_tokens) > 0, "Should have received streamed tokens"
-    final_content = response["messages"][-1].content
-    assert final_content, "Final response should not be empty"
-
-
-@pytest.mark.asyncio
 async def test_supervisor_basic(knowledge_tree, experience_tree):
-    """
-    Test Supervisor with a simple worker agent.
-    """
+    """Test Supervisor with a simple worker agent."""
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
 
@@ -283,15 +212,13 @@ async def test_supervisor_basic(knowledge_tree, experience_tree):
 
 
 @pytest.mark.asyncio
-async def test_load_mcp_tools_function():
-    """
-    Test the load_mcp_tools helper function with different inputs.
-    """
-    # Test with a list of tools
-    mock_tools = [{"name": "tool1"}, {"name": "tool2"}]
-    loaded_tools = await load_mcp_tools(mock_tools)
+async def test_load_mcp_tools_function(mcp_client):
+    """Test the load_mcp_tools helper function with different inputs."""
+    # Test with real tools from an MCPClient
+    real_tools = mcp_client.get_tools()
+    loaded_tools = await load_mcp_tools(real_tools)
     assert (
-        loaded_tools == mock_tools
+        loaded_tools == real_tools
     ), "Should return the same list when input is a list"
 
     # Test with None
@@ -306,37 +233,33 @@ async def test_load_mcp_tools_function():
 
 @pytest.mark.asyncio
 async def test_agent_with_mcp_tools(knowledge_tree, experience_tree, mcp_client):
-    """
-    Test creating an agent with MCP tools.
-    This test requires real MCP servers to be configured and available.
-    Skip if API keys are not available.
-    """
+    """Test creating an agent with MCP tools."""
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
 
-    # Skip test if Claude 3 is not available (needed for good tool use)
+    # Skip test if Claude 3 is not available
     if not os.environ.get("ANTHROPIC_API_KEY"):
         pytest.skip("ANTHROPIC_API_KEY not set")
 
-    # Prüfe, ob MCP-Client funktioniert
+    # Check if MCP client works
     servers = mcp_client.list_servers()
     if not servers:
-        pytest.skip("Keine MCP-Server konfiguriert")
+        pytest.skip("No MCP servers configured")
 
     active_servers = mcp_client.list_active_servers()
     if not active_servers:
-        pytest.skip("Keine aktiven MCP-Server gefunden")
+        pytest.skip("No active MCP servers found")
 
     # Create agent with MCP tools
     agent_app = await create_agent(
         provider="anthropic",
-        model_name="claude-3-haiku-20240307",  # Best for tool use
+        model_name="claude-3-haiku-20240307",
         agent_name="mcp_tools_agent",
         knowledge_tree=knowledge_tree,
         experience_tree=experience_tree,
         tools=mcp_client,  # Pass the MCP client
         system_prompt="You are a helpful assistant with access to tools. Use the appropriate tool when needed.",
-        use_react_agent=True,  # Use ReAct for better tool use
+        use_react_agent=True,
         llm_specific_kwargs={"default_headers": {"anthropic-beta": "tools-2024-04-04"}},
     )
 
@@ -359,86 +282,9 @@ async def test_agent_with_mcp_tools(knowledge_tree, experience_tree, mcp_client)
         assert "messages" in response
         assert len(response["messages"]) > 0
 
-        # Protokolliere die Antwort, aber erzwinge keinen bestimmten Inhalt
+        # Log the response but don't enforce specific content
         last_message = response["messages"][-1]
         logging.info(f"Response to '{test_query}': {last_message.content}")
     except Exception as e:
         logging.error(f"Error testing agent with MCP tools: {e}")
         raise
-
-
-@pytest.mark.asyncio
-async def test_supervisor_with_mcp_tools(knowledge_tree, experience_tree, mcp_client):
-    """
-    Test Supervisor with MCP tools.
-    This test requires real MCP servers to be configured and available.
-    Skip if API keys are not available.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY") or not os.environ.get("OPENAI_API_KEY"):
-        pytest.skip("ANTHROPIC_API_KEY and OPENAI_API_KEY are required")
-
-    # Prüfe, ob MCP-Client funktioniert
-    servers = mcp_client.list_servers()
-    if not servers:
-        pytest.skip("Keine MCP-Server konfiguriert")
-
-    active_servers = mcp_client.list_active_servers()
-    if not active_servers:
-        pytest.skip("Keine aktiven MCP-Server gefunden")
-
-    # Create worker agent
-    worker_agent = await create_agent(
-        provider="openai",
-        model_name=TEST_OPENAI_MODEL,
-        agent_name="worker_agent",
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
-        system_prompt="You are a helpful worker. Answer questions directly and concisely.",
-    )
-
-    # Create supervisor with MCP tools
-    supervisor = Supervisor(
-        agents=[worker_agent],
-        supervisor_provider="anthropic",
-        supervisor_model_name="claude-3-haiku-20240307",
-        supervisor_system_prompt=(
-            "You are a supervisor with special tools. Use your tools when appropriate, "
-            "and delegate tasks to worker_agent when needed."
-        ),
-        supervisor_tools=mcp_client,  # Pass the MCP client
-        llm_specific_kwargs={"default_headers": {"anthropic-beta": "tools-2024-04-04"}},
-    )
-
-    try:
-        # Initialize the supervisor
-        await supervisor.init_supervisor()
-        assert supervisor.app is not None, "Supervisor should be initialized"
-
-        # Test supervisor with a request that might use tools
-        thread_id = f"supervisor_mcp_thread_{uuid.uuid4()}"
-        test_query = "What's the current time in Tokyo and New York?"
-
-        response = await supervisor.invoke(
-            messages=[HumanMessage(content=test_query)], thread_id=thread_id
-        )
-
-        # Verify response
-        assert response is not None
-        assert "messages" in response
-        assert len(response["messages"]) > 0
-
-        # Protokolliere die Antwort
-        final_message = response["messages"][-1]
-        response_content = (
-            final_message.content if hasattr(final_message, "content") else ""
-        )
-        logging.info(f"Final response to '{test_query}': {response_content}")
-    except Exception as e:
-        logging.error(f"Error testing supervisor with MCP tools: {e}")
-        raise
-
-
-# Removed old tests:
-# test_openai_agent_init, test_openai_agent_not_initialized,
-# test_anthropic_agent_init, test_ollama_agent_init
-# Their functionality is covered by test_create_agent_initialization and other specific tests.

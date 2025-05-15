@@ -1,6 +1,5 @@
 """
 Tests for the Agents API endpoints.
-Test agent creation, retrieval, update, and deletion.
 """
 
 import uuid
@@ -10,7 +9,7 @@ def test_create_agent(api_test_client):
     """Test creating a new agent."""
     client, _ = api_test_client
 
-    # Testdaten für die Agent-Erstellung
+    # Test data for agent creation
     agent_data = {
         "name": "Test Agent",
         "provider": "anthropic",
@@ -40,7 +39,7 @@ def test_list_agents(api_test_client):
     """Test listing all agents."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Agent
+    # Create an agent first
     agent_data = {
         "name": "Test Agent for List",
         "provider": "anthropic",
@@ -50,7 +49,7 @@ def test_list_agents(api_test_client):
     create_response = client.post("/agents", json=agent_data)
     assert create_response.status_code == 201
 
-    # Hole die Liste aller Agenten
+    # Get the list of all agents
     list_response = client.get("/agents")
     assert list_response.status_code == 200
 
@@ -58,21 +57,21 @@ def test_list_agents(api_test_client):
     assert isinstance(agents, list)
     assert len(agents) >= 1
 
-    # Finde den erstellten Agenten in der Liste
+    # Find the created agent in the list
     found = False
     for agent in agents:
         if agent["name"] == agent_data["name"]:
             found = True
             break
 
-    assert found, "Der erstellte Agent wurde nicht in der Liste gefunden"
+    assert found, "Created agent was not found in the list"
 
 
 def test_get_agent(api_test_client):
     """Test getting an agent by ID."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Agent
+    # Create an agent first
     agent_data = {
         "name": "Test Agent for Get",
         "provider": "openai",
@@ -84,7 +83,7 @@ def test_get_agent(api_test_client):
     created_agent = create_response.json()
     agent_id = created_agent["id"]
 
-    # Hole den Agenten mit seiner ID
+    # Get the agent by ID
     get_response = client.get(f"/agents/{agent_id}")
     assert get_response.status_code == 200
 
@@ -99,7 +98,7 @@ def test_update_agent(api_test_client):
     """Test updating an agent."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Agent
+    # Create an agent first
     agent_data = {
         "name": "Agent before update",
         "provider": "anthropic",
@@ -111,7 +110,7 @@ def test_update_agent(api_test_client):
     created_agent = create_response.json()
     agent_id = created_agent["id"]
 
-    # Aktualisiere den Agenten
+    # Update the agent
     update_data = {
         "name": "Agent after update",
         "system_prompt": "This is an updated system prompt.",
@@ -124,7 +123,7 @@ def test_update_agent(api_test_client):
     assert updated_agent["id"] == agent_id
     assert updated_agent["name"] == update_data["name"]
     assert updated_agent["system_prompt"] == update_data["system_prompt"]
-    # Die nicht aktualisierten Felder sollten unverändert bleiben
+    # Fields not updated should remain unchanged
     assert updated_agent["provider"] == agent_data["provider"]
     assert updated_agent["model_name"] == agent_data["model_name"]
 
@@ -133,7 +132,7 @@ def test_delete_agent(api_test_client):
     """Test deleting an agent."""
     client, _ = api_test_client
 
-    # Erstelle erst einen Agent
+    # Create an agent first
     agent_data = {
         "name": "Agent to delete",
         "provider": "openai",
@@ -145,11 +144,11 @@ def test_delete_agent(api_test_client):
     created_agent = create_response.json()
     agent_id = created_agent["id"]
 
-    # Lösche den Agenten
+    # Delete the agent
     delete_response = client.delete(f"/agents/{agent_id}")
     assert delete_response.status_code == 204
 
-    # Versuche, den gelöschten Agenten abzurufen
+    # Try to retrieve the deleted agent
     get_response = client.get(f"/agents/{agent_id}")
     assert get_response.status_code == 404
 

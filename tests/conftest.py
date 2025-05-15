@@ -1,6 +1,6 @@
 """
-Pytest fixtures für mcp_agents Tests.
-Produktionsreif, robust, DRY. Alle Docstrings auf Englisch.
+Pytest fixtures for mcp_agents tests.
+Production-ready, robust, DRY.
 """
 
 import os
@@ -28,58 +28,75 @@ except ImportError:
 
 @pytest.fixture(scope="session")
 def qdrant_url():
-    """
-    Returns the Qdrant URL from environment or default.
-    """
+    """Returns the Qdrant URL from environment or default."""
     return os.environ.get("QDRANT_URL", "http://localhost:6333")
 
 
 @asyncio_fixture(scope="function")
 async def knowledge_tree(qdrant_url):
-    """
-    Returns a fresh KnowledgeTree for each test, with clean collection.
-    """
-    # Verwende die asynchrone Factory-Methode
-    tree = await KnowledgeTree.create(
-        url=qdrant_url,
-        collection_name="test_knowledge_collection",
-        recreate_on_dim_mismatch=True,
-    )
+    """Returns a fresh KnowledgeTree for each test, with clean collection."""
+    try:
+        tree = await KnowledgeTree.create(
+            url=qdrant_url,
+            collection_name="test_knowledge_collection",
+            recreate_on_dim_mismatch=True,
+            embedding_provider=get_real_embedding_provider,
+        )
+    except Exception as e:
+        logging.warning(f"Error creating KnowledgeTree with real embeddings: {e}")
+        logging.warning("Using fallback with mock embeddings")
+        tree = await KnowledgeTree.create(
+            url=qdrant_url,
+            collection_name="test_knowledge_collection",
+            recreate_on_dim_mismatch=True,
+            embedding_provider=mock_embedding_provider,
+        )
+
     await tree.clear_all_points_async()
     yield tree
-    # Cleanup nach Tests
     await tree.clear_all_points_async()
 
 
 @asyncio_fixture(scope="function")
 async def experience_tree(qdrant_url):
-    """
-    Returns a fresh ExperienceTree for each test, with clean collection.
-    """
-    # Verwende die asynchrone Factory-Methode
-    tree = await ExperienceTree.create(
-        url=qdrant_url,
-        collection_name="test_experience_collection",
-        recreate_on_dim_mismatch=True,
-    )
+    """Returns a fresh ExperienceTree for each test, with clean collection."""
+    try:
+        tree = await ExperienceTree.create(
+            url=qdrant_url,
+            collection_name="test_experience_collection",
+            recreate_on_dim_mismatch=True,
+            embedding_provider=get_real_embedding_provider,
+        )
+    except Exception as e:
+        logging.warning(f"Error creating ExperienceTree with real embeddings: {e}")
+        logging.warning("Using fallback with mock embeddings")
+        tree = await ExperienceTree.create(
+            url=qdrant_url,
+            collection_name="test_experience_collection",
+            recreate_on_dim_mismatch=True,
+            embedding_provider=mock_embedding_provider,
+        )
+
     await tree.clear_all_points_async()
     yield tree
-    # Cleanup nach Tests
     await tree.clear_all_points_async()
 
 
 @asyncio_fixture(scope="function")
 async def mcp_client():
-    """
-    Provides an MCPClient instance for testing with proper cleanup.
-    """
+    """Provides an MCPClient instance for testing with proper cleanup."""
     client = None
     try:
         client = MCPClient()
+        logging.info(
+            f"MCPClient for tests with {len(client.list_servers())} configured servers"
+        )
+        for server in client.list_servers():
+            logging.info(f"  - Server: {server}")
+
         yield client
     finally:
-        if client:
-            await client.async_shutdown()
+        pass
 
 
 @pytest.fixture(scope="function")
@@ -90,12 +107,9 @@ def api_test_client():
     Returns:
         tuple: (TestClient, MCPAgentsAPI) - The test client and API instance
     """
-    # Create test instance of the API with in-memory DB
     test_api = MCPAgentsAPI(
         db_path=":memory:", title="Test MCP Agents API", version="test"
     )
-
-    # Create and yield test client
     client = TestClient(test_api)
     return client, test_api
 
@@ -128,24 +142,19 @@ def live_api_server():
     Returns:
         str: Base URL of the running server
     """
-    # Create real FastAPI instance with test DB
     api = MCPAgentsAPI(
         db_path="test_live_api.duckdb", title="Live Test MCP Agents API", version="test"
     )
 
-    # Find an available port
     port = find_free_port()
     host = "127.0.0.1"
 
-    # Create and configure the server
     config = uvicorn.Config(app=api, host=host, port=port, log_level="error")
     server = UvicornTestServer(config=config)
 
-    # Start server in a separate thread
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
 
-    # Wait for server to start
     startup_timeout = 5.0
     start_time = time.time()
     while not server.is_running and time.time() - start_time < startup_timeout:
@@ -154,32 +163,25 @@ def live_api_server():
     if not server.is_running:
         raise RuntimeError("Failed to start API server within timeout period")
 
-    # Create base URL
     base_url = f"http://{host}:{port}"
 
-    # Create test client with real server
     client = httpx.Client(base_url=base_url, timeout=30.0)
 
-    # Check server is responsive
     try:
         response = client.get("/health")
         response.raise_for_status()
     except Exception as e:
         raise RuntimeError(f"Failed to connect to API server: {e}")
 
-    # Return base URL
     yield base_url
 
-    # Shutdown
     server.should_exit = True
     thread.join(timeout=5)
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """
-    Hook to run at the very end of the test session for resource cleanup.
-    """
-    if os.name == "nt":  # Windows-spezifisch
+    """Hook to run at the very end of the test session for resource cleanup."""
+    if os.name == "nt":
         logging.info("Test session ended. Adding cleanup delay...")
         try:
             asyncio.run(asyncio.sleep(1))
@@ -189,7 +191,6 @@ def pytest_sessionfinish(session, exitstatus):
 
             time.sleep(1)
 
-    # Cleanup test database if it exists
     test_db_path = "test_live_api.duckdb"
     if os.path.exists(test_db_path):
         try:
@@ -198,21 +199,36 @@ def pytest_sessionfinish(session, exitstatus):
             logging.warning(f"Could not remove test database: {e}")
 
 
-# Mocking-Klasse für Embeddings, aber nicht in Fixtures verwendet
+async def get_real_embedding_provider():
+    """
+    Provides a real embedding provider for tests.
+    Uses the model defined in EMBEDDING_MODEL env var or default.
+    """
+    from langchain_openai import OpenAIEmbeddings
+
+    model_name = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+    embeddings = OpenAIEmbeddings(model=model_name)
+    dimension = 1536  # Standard dimension for text-embedding-3-small
+
+    return embeddings, dimension
+
+
 class MockEmbeddings:
+    """Fallback embedding implementation when API keys are not available."""
+
     def __init__(self, dimension=768):
         self.dimension = dimension
+        logging.warning("Using MockEmbeddings! Configure API keys for real tests.")
 
     def embed_query(self, text):
-        # Einfache deterministische Mock-Funktion für Embeddings
         return [0.1] * self.dimension
 
     def embed_documents(self, documents):
-        # Batch-Version
         return [[0.1] * self.dimension for _ in documents]
 
 
 async def mock_embedding_provider():
-    """Mock-Embedding-Provider für Tests"""
+    """Fallback for tests when real embeddings are not available."""
+    logging.warning("Using mock_embedding_provider! Configure API keys for real tests.")
     embed = MockEmbeddings(dimension=768)
     return embed, 768
