@@ -15,8 +15,8 @@ from typing import Any, TypedDict
 from typing_extensions import NotRequired  # Python 3.12+ standard
 
 # Modern Qdrant client with async API
-from langchain.schema.embeddings import Embeddings
 from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_core.embeddings import Embeddings
 from qdrant_client import QdrantClient, models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import (

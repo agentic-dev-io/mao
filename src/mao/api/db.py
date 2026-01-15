@@ -533,16 +533,16 @@ class ConfigDB:
         """Gets all tools assigned to an agent asynchronously"""
         async with self.async_connection() as conn:
             query = """
-            SELECT t.*, at.enabled as agent_tool_enabled
-            FROM agent_tools at
-            JOIN tools t ON at.tool_id = t.id
-            WHERE at.agent_id = ?
+            SELECT t.*, agt.enabled as agent_tool_enabled
+            FROM agent_tools agt
+            JOIN tools t ON agt.tool_id = t.id
+            WHERE agt.agent_id = ?
             """
 
             params = [agent_id]
 
             if enabled_only:
-                query += " AND at.enabled = TRUE AND t.enabled = TRUE"
+                query += " AND agt.enabled = TRUE AND t.enabled = TRUE"
 
             query += " ORDER BY t.name"
 
