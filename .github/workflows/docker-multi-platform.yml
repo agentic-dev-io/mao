@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       platforms:
@@ -19,6 +23,7 @@ permissions:
 jobs:
   multi-platform-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +62,13 @@ jobs:
 
       - name: Build and push
         run: |
-          PLATFORMS="${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          if [[ -n "${{ github.event.inputs.platforms }}" ]]; then
+            PLATFORMS="${{ github.event.inputs.platforms }}"
+          elif [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+            PLATFORMS="linux/amd64,linux/arm64"
+          else
+            PLATFORMS="linux/amd64"
+          fi
           docker buildx build \
             --platform ${PLATFORMS} \
             --push \
