@@ -1,131 +1,149 @@
-# PyPI Publishing Setup
+# PyPI Publishing Setup for mao
 
-This document explains how to set up automated PyPI publishing for the mao package.
+This document explains how to configure PyPI publishing for the mao package using GitHub Actions and trusted publishing.
+
+## Important: First Release
+
+The **mao** package has NEVER been released to PyPI! This PR updates the workflow to use trusted publishing and provides instructions for creating the first v0.1.0 release.
 
 ## Prerequisites
 
-1. A PyPI account (create one at https://pypi.org/account/register/)
-2. Admin access to this GitHub repository
+1. A PyPI account at https://pypi.org
+2. Admin access to the GitHub repository
 
-## Setup Steps
+## Setup Instructions
 
-### 1. Create PyPI API Token
+### 1. Configure PyPI Trusted Publishing
 
-1. Log in to your PyPI account at https://pypi.org/
-2. Go to Account Settings → API tokens
-3. Click "Add API token"
-4. Fill in the token details:
-   - **Token name**: `mao-github-actions` (or similar)
-   - **Scope**: Choose "Project: mao" if the project exists, or "Entire account" for first-time setup
-5. Click "Add token"
-6. **IMPORTANT**: Copy the token immediately - it will only be shown once!
-   - The token starts with `pypi-`
+PyPI's trusted publishing eliminates the need for API tokens by using OpenID Connect (OIDC) to verify that the package is being published from the correct GitHub repository.
 
-### 2. Add Token to GitHub Secrets
+1. Go to https://pypi.org and log in
+2. Navigate to your account settings
+3. Go to "Publishing" section
+4. Click "Add a new pending publisher"
+5. Fill in the details:
+   - **PyPI Project Name**: `mao`
+   - **Owner**: `bjoernbethge`
+   - **Repository name**: `mao`
+   - **Workflow name**: `publish.yml`
+   - **Environment name**: (leave empty)
+6. Click "Add"
 
-1. Go to your GitHub repository
-2. Navigate to: **Settings → Secrets and variables → Actions**
-3. Click "New repository secret"
-4. Fill in the secret details:
-   - **Name**: `PYPI_API_TOKEN`
-   - **Value**: Paste the token you copied from PyPI (including the `pypi-` prefix)
-5. Click "Add secret"
+**Note**: For the first publish, you need to create the project as a "pending publisher" before the package exists on PyPI.
 
-### 3. Publishing Releases
+### 2. Create Your First Release (v0.1.0)
 
-The workflow is now configured! You can publish to PyPI in two ways:
+Once trusted publishing is configured, create the first release:
 
-#### Option A: Create a GitHub Release (Recommended)
+1. Verify the version in `pyproject.toml` is set to `0.1.0`
+2. Go to https://github.com/bjoernbethge/mao/releases/new
+3. Click "Choose a tag" and create a new tag: `v0.1.0`
+4. Set the release title: "mao v0.1.0 - Initial Release"
+5. Add release notes describing the package features:
+   ```markdown
+   # mao v0.1.0 - Initial Release
 
-1. Go to your GitHub repository
-2. Click "Releases" → "Create a new release"
-3. Fill in the release details:
-   - **Tag**: `v0.1.0` (already created!)
-   - **Release title**: `v0.1.0 - First Release`
-   - **Description**: Add release notes
-4. Click "Publish release"
+   First public release of MCP Agent Orchestra - A modern framework for orchestrating AI agents.
 
-The workflow will automatically trigger and publish to PyPI!
+   ## Features
+   - FastAPI-based agent orchestration
+   - Support for multiple LLM providers (OpenAI, Anthropic, Ollama)
+   - LangChain and LangGraph integration
+   - Vector storage with Qdrant
+   - DuckDB for data management
+   - Docker support
+   ```
+6. Click "Publish release"
 
-**Note**: The v0.1.0 tag has already been created locally. Push it with:
+The GitHub Action will automatically:
+- Build the package
+- Run quality checks
+- Publish to PyPI using trusted publishing
+
+### 3. Subsequent Releases
+
+For future releases:
+
+1. Update the version in `pyproject.toml` (e.g., `0.2.0`)
+2. Commit the change
+3. Create a new GitHub release with the matching tag (e.g., `v0.2.0`)
+
+### 4. Manual Publishing (Optional)
+
+You can also trigger publishing manually without creating a release:
+
+1. Go to https://github.com/bjoernbethge/mao/actions/workflows/publish.yml
+2. Click "Run workflow"
+3. Select the branch to publish from
+4. Optionally specify a version override
+5. Click "Run workflow"
+
+## Verifying the Package
+
+After publishing, verify your package at:
+- https://pypi.org/project/mao/
+
+Install it using:
 ```bash
-git push origin v0.1.0
+pip install mao
 ```
 
-Then create the GitHub release using this tag.
+## Changes in This PR
 
-#### Option B: Manual Workflow Dispatch
+This PR updates the publishing workflow to use trusted publishing:
 
-1. Go to **Actions → Publish Package**
-2. Click "Run workflow"
-3. Enter the version number (e.g., `0.1.0`) or leave empty to use version from pyproject.toml
-4. Click "Run workflow"
+- Removed API token requirement (more secure!)
+- Changed trigger from `created` to `published` (GitHub best practice)
+- Reduced timeout from 30 to 15 minutes (more appropriate for Python packages)
+- Updated documentation to reflect trusted publishing setup
 
-## Workflow Features
+### Migration from Token-Based Publishing
 
-The publishing workflow includes:
-
-- ✅ Automated package building with uv and Python build tools
-- ✅ Package validation with twine check
-- ✅ Publishing to PyPI with API token authentication
-- ✅ Skip existing versions (won't fail if version already exists)
-- ✅ Manual version override via workflow dispatch
-- ✅ Triggered automatically on GitHub releases
-- ✅ Support for uv package manager
-
-## Current Status
-
-- ✅ Workflow configured at `.github/workflows/publish.yml`
-- ✅ Release tag v0.1.0 created locally
-- ⏳ Waiting for GitHub release creation to trigger first publish
-- ⏳ Waiting for PYPI_API_TOKEN secret to be configured
+If you previously had `PYPI_API_TOKEN` in GitHub secrets, you can now:
+1. Delete the secret (it's no longer needed)
+2. Follow the trusted publishing setup above
+3. Trusted publishing is more secure and doesn't require token management
 
 ## Troubleshooting
 
-### "Package already exists" Error
+### First Publish Fails
 
-If you see this error, the version already exists on PyPI. The workflow uses `skip-existing: true`, so this should not cause failures. To publish a new version:
+If the first publish fails with "project does not exist", make sure you:
+1. Created the pending publisher on PyPI first
+2. Used the exact workflow filename (`publish.yml`)
+3. The repository owner and name match exactly
 
+### Permission Denied
+
+If you get permission errors:
+1. Verify the trusted publisher is configured correctly on PyPI
+2. Ensure the workflow has `id-token: write` permissions (already configured)
+3. Check that the repository owner matches the PyPI project owner
+
+## Version Management
+
+The package version is defined in `pyproject.toml`:
+
+```toml
+[project]
+name = "mao"
+version = "0.1.0"
+```
+
+Before creating a new release:
 1. Update the version in `pyproject.toml`
-2. Commit and push
-3. Create a new release with the new version tag
+2. Commit the change
+3. Create a new release with a matching tag (e.g., `v0.2.0`)
 
-### "Invalid credentials" Error
+## Security
 
-This means the `PYPI_API_TOKEN` secret is incorrect or expired:
+Trusted publishing is more secure than API tokens because:
+- No long-lived credentials stored in GitHub secrets
+- Automatic verification of publisher identity
+- Per-repository and per-workflow restrictions
+- Automatic token rotation
 
-1. Generate a new token on PyPI
-2. Update the GitHub secret with the new token
-3. Re-run the workflow
+## Additional Resources
 
-### Workflow Not Triggering
-
-Make sure:
-
-1. The workflow file exists at `.github/workflows/publish.yml`
-2. You're creating a "Release" (not just a git tag)
-3. The release is "Published" (not a draft)
-4. The tag has been pushed to the remote repository
-
-## Security Best Practices
-
-- ✅ Never commit API tokens to the repository
-- ✅ Use repository secrets for sensitive data
-- ✅ Rotate tokens periodically
-- ✅ Use scoped tokens (project-specific) when possible
-- ✅ Enable two-factor authentication on your PyPI account
-
-## Alternative: Trusted Publishing (Advanced)
-
-For enhanced security, you can use PyPI's Trusted Publishing (no API tokens needed):
-
-1. On PyPI, go to your project → Manage → Publishing
-2. Add a new "trusted publisher":
-   - **Owner**: Your GitHub username/org
-   - **Repository**: mao
-   - **Workflow**: publish.yml
-   - **Environment**: (leave empty)
-3. Remove the `password` line from the workflow (keep id-token: write permission)
-4. The workflow will use OpenID Connect for authentication
-
-This method is more secure as it doesn't require storing secrets!
+- [PyPI Trusted Publishing Guide](https://docs.pypi.org/trusted-publishers/)
+- [GitHub Actions: Publishing Python Packages](https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python#publishing-to-package-registries)
