@@ -44,7 +44,7 @@ jobs:
           echo "Usage report generated" >> reports/report-$(date +%Y-%m).txt
 
       - name: Upload Report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: actions-usage-report
           path: reports/
