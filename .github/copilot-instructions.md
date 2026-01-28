@@ -68,7 +68,12 @@ EMBEDDING_MODEL=text-embedding-3-small
 MCP_DB_PATH=./data/mcp_config.duckdb
 MCP_CONFIG_PATH=./mcp.json
 OLLAMA_HOST=http://localhost:11434
+
+# MCP Server API Keys (optional)
+CONTEXT7_API_KEY=your-context7-api-key  # For up-to-date code docs
 ```
+
+**Note**: context7 MCP server is configured in `mcp.json` and provides AI agents with access to current library documentation. Get an API key from [context7.com](https://context7.com) if needed.
 
 ### Docker Services (Required for Integration Tests)
 
