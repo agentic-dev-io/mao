@@ -175,7 +175,7 @@ async def load_mcp_tools(
 def _determine_tokenizer_for_trim(llm: BaseChatModel) -> Union[BaseChatModel, str]:
     """Helper to determine the appropriate tokenizer for message trimming."""
     if isinstance(llm, ChatOllama):
-        return llm.model
+        return "approximate"
     elif not (
         hasattr(llm, "get_num_tokens_from_messages") or hasattr(llm, "get_num_tokens")
     ):
