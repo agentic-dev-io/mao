@@ -206,13 +206,12 @@ async def test_supervisor_basic(knowledge_tree, experience_tree):
 @pytest.mark.asyncio
 async def test_load_mcp_tools_function(mcp_client):
     """Test the load_mcp_tools helper function with different inputs."""
-    # Test with real tools from an MCPClient (requires session context)
-    async with mcp_client.session() as client:
-        real_tools = client.get_tools()
-        loaded_tools = await load_mcp_tools(real_tools)
-        assert (
-            loaded_tools == real_tools
-        ), "Should return the same list when input is a list"
+    # Test with real tools from an MCPClient (no context manager needed)
+    real_tools = await mcp_client.get_tools()
+    loaded_tools = await load_mcp_tools(real_tools)
+    assert (
+        loaded_tools == real_tools
+    ), "Should return the same list when input is a list"
 
     # Test with None
     empty_tools = await load_mcp_tools(None)

@@ -9,7 +9,6 @@ import logging
 import os
 import pathlib
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
 from typing import Any, TypedDict, TypeVar
 from urllib.parse import urljoin
 
@@ -234,15 +233,6 @@ class MCPClient(MultiServerMCPClient):
                 results[server_name] = False
 
         return results
-
-    @asynccontextmanager
-    async def session(self):
-        """Context manager for an MCP session with proper cleanup."""
-        try:
-            await self.__aenter__()
-            yield self
-        finally:
-            await self.__aexit__(None, None, None)
 
 
 # Type variable for generic function

@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
 # LLM Clients
-from langchain_ollama import OllamaLLM
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 # LangGraph
@@ -122,9 +122,9 @@ def _create_llm_client(
             **llm_specific_kwargs,
         )
     elif provider_lower == "ollama":
-        if OllamaLLM is None:
+        if ChatOllama is None:
             raise ImportError(
-                "OllamaLLM is not available. Please install langchain_ollama."
+                "ChatOllama is not available. Please install langchain_ollama."
             )
         ollama_final_kwargs = {
             "model": model_name,
@@ -135,7 +135,7 @@ def _create_llm_client(
         ollama_host = os.environ.get("OLLAMA_HOST")
         if ollama_host and "base_url" not in ollama_final_kwargs:
             ollama_final_kwargs["base_url"] = ollama_host
-        return OllamaLLM(**ollama_final_kwargs)  # type: ignore
+        return ChatOllama(**ollama_final_kwargs)  # type: ignore
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -157,17 +157,14 @@ async def load_mcp_tools(
         return []
 
     if isinstance(mcp_client, MCPClient):
-        logging.debug("Entering MCPClient context to load tools...")
-        async with mcp_client.session() as client:
-            try:
-                tools = client.get_tools()
-                logging.debug(
-                    f"Successfully loaded {len(tools)} tools from MCP servers"
-                )
-                return tools
-            except Exception as e:
-                logging.error(f"Error loading MCP tools: {e}")
-                return []
+        logging.debug("Loading tools from MCPClient...")
+        try:
+            tools = await mcp_client.get_tools()
+            logging.debug(f"Successfully loaded {len(tools)} tools from MCP servers")
+            return tools
+        except Exception as e:
+            logging.error(f"Error loading MCP tools: {e}")
+            return []
     elif isinstance(mcp_client, list):
         return mcp_client
     else:
@@ -177,7 +174,7 @@ async def load_mcp_tools(
 
 def _determine_tokenizer_for_trim(llm: BaseChatModel) -> Union[BaseChatModel, str]:
     """Helper to determine the appropriate tokenizer for message trimming."""
-    if isinstance(llm, OllamaLLM):
+    if isinstance(llm, ChatOllama):
         return llm.model
     elif not (
         hasattr(llm, "get_num_tokens_from_messages") or hasattr(llm, "get_num_tokens")
