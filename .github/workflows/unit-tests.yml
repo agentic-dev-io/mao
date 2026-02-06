@@ -27,6 +27,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Set up Node.js (for MCP server config)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -44,17 +49,10 @@ jobs:
         run: |
           echo '{
             "mcpServers": {
-              "dockerailabs": {
-                  "command": "docker",
-                  "args": [
-                    "run",
-                    "-i",
-                    "--rm",
-                    "alpine/socat",
-                    "STDIO",
-                    "TCP:host.docker.internal:8811"
-                  ]
-                }
+              "memory": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-memory"]
+              }
             }
           }' > ./mcp.json
 

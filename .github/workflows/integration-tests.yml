@@ -53,9 +53,10 @@ jobs:
           docker pull ollama/ollama:latest
           docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
 
-      - name: Pull docker mcp toolkit container
-        run: |
-          docker pull alpine/socat:latest
+      - name: Set up Node.js (for MCP server)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Install uv
         run: |
@@ -75,17 +76,10 @@ jobs:
         run: |
           echo '{
             "mcpServers": {
-              "dockerailabs": {
-                  "command": "docker",
-                  "args": [
-                    "run",
-                    "-i",
-                    "--rm",
-                    "alpine/socat",
-                    "STDIO",
-                    "TCP:host.docker.internal:8811"
-                  ]
-                }
+              "memory": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-memory"]
+              }
             }
           }' > ./mcp.json
 
