@@ -1,4 +1,4 @@
-# MAO - MCP Agent Orchestra
+# MAO - Multi Agent Orchestration
 
 <div align="center">
   <p>
