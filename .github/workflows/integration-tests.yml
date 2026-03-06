@@ -1,10 +1,8 @@
 name: Integration Tests
 
 on:
-  # Run on main branch pushes
   push:
     branches: [ main ]
-  # Run on PRs with the 'test-integration' label
   pull_request:
     types: [ labeled, synchronize, opened, reopened ]
   workflow_dispatch:
@@ -12,10 +10,6 @@ on:
 jobs:
   integration-tests:
     runs-on: ubuntu-latest
-    # Only run if:
-    # 1. Branch is main, OR
-    # 2. PR has 'test-integration' label, OR
-    # 3. Manually triggered
     if: |
       github.ref == 'refs/heads/main' ||
       contains(github.event.pull_request.labels.*.name, 'test-integration') ||
@@ -23,14 +17,12 @@ jobs:
     timeout-minutes: 30
 
     env:
-      QDRANT_URL: http://localhost:6333
       MCP_DB_PATH: ./data/mcp_config.duckdb
       MCP_CONFIG_PATH: ./mcp.json
       OLLAMA_HOST: http://localhost:11434
       TEST_LLM_PROVIDER: ollama
       TEST_LLM_MODEL: qwen3:0.6b
       PYTHONUNBUFFERED: 1
-      DEBUG: "true"
 
     steps:
       - uses: actions/checkout@v6
@@ -42,11 +34,6 @@ jobs:
 
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
-
-      - name: Start Qdrant container
-        run: |
-          docker pull qdrant/qdrant:latest
-          docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest
 
       - name: Start Ollama container
         run: |
@@ -70,7 +57,6 @@ jobs:
         run: |
           uv sync
           uv pip install pytest pytest-asyncio pytest-cov pytest-timeout pytest-xdist
-          uv pip list
 
       - name: Setup MCP configuration for tests
         run: |
@@ -85,7 +71,6 @@ jobs:
 
       - name: Pull Ollama model
         run: |
-          # Wait for Ollama to be ready first
           for i in {1..60}; do
             if curl -s http://localhost:11434/api/version > /dev/null; then
               break
@@ -94,32 +79,15 @@ jobs:
           done
           docker exec ollama ollama pull qwen3:0.6b
 
-      - name: Wait for services to be ready
+      - name: Wait for Ollama
         run: |
-          # Wait for Qdrant
-          echo "Waiting for Qdrant..."
-          for i in {1..60}; do
-            if curl -s http://localhost:6333/health > /dev/null; then
-              echo "Qdrant is ready!"
-              break
-            fi
-            if [ $i -eq 60 ]; then
-              echo "Qdrant failed to start in time."
-              docker logs qdrant
-              exit 1
-            fi
-            sleep 1
-          done
-
-          # Wait for Ollama
-          echo "Waiting for Ollama..."
           for i in {1..60}; do
             if curl -s http://localhost:11434/api/version > /dev/null; then
               echo "Ollama is ready!"
               break
             fi
             if [ $i -eq 60 ]; then
-              echo "Ollama failed to start in time."
+              echo "Ollama failed to start."
               docker logs ollama
               exit 1
             fi
@@ -128,7 +96,6 @@ jobs:
 
       - name: Run integration tests
         run: |
-          # Run all tests that require Docker services
           uv run pytest --cov=src --timeout=120 -v \
             tests/test_storage.py \
             tests/test_agents.py \

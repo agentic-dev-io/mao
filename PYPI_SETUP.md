@@ -49,7 +49,7 @@ Once trusted publishing is configured, create the first release:
    - FastAPI-based agent orchestration
    - Support for multiple LLM providers (OpenAI, Anthropic, Ollama)
    - LangChain and LangGraph integration
-   - Vector storage with Qdrant
+   - DuckDB-based vector storage (no external services needed)
    - DuckDB for data management
    - Docker support
    ```

@@ -9,15 +9,7 @@ on:
       - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
-      - '**.txt'
-  pull_request:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - '**.txt'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,7 +31,6 @@ jobs:
       - name: Set up Docker tags
         id: tags
         run: |
-          REPO_NAME=$(echo "${{ github.repository }}" | cut -d '/' -f 2)
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
             TAGS="ghcr.io/${{ github.repository }}:${VERSION}"
@@ -57,12 +48,10 @@ jobs:
           SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           TAGS="$TAGS,ghcr.io/${{ github.repository }}:sha-${SHA_SHORT}"
           echo "TAGS=${TAGS}" >> $GITHUB_ENV
-          echo "Using tags: ${TAGS}"
 
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build and push
         run: |
@@ -75,14 +64,7 @@ jobs:
             ${PUSH_FLAG} \
             --tag $(echo $TAGS | sed 's/,/ --tag /g') \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --build-arg OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
-            --build-arg ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }} \
-            --build-arg QDRANT_URL=${{ secrets.QDRANT_URL }} \
-            --build-arg EMBEDDING_MODEL=${{ secrets.EMBEDDING_MODEL }} \
-            --build-arg MCP_DB_PATH=${{ secrets.MCP_DB_PATH }} \
-            --build-arg MCP_CONFIG_PATH=${{ secrets.MCP_CONFIG_PATH }} \
-            --build-arg OLLAMA_HOST=${{ secrets.OLLAMA_HOST }} \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             -f ./docker/Dockerfile.api \
-            . 
+            .

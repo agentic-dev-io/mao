@@ -3,42 +3,28 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-      # Enable BuildKit for cache mounts
       args:
         BUILDKIT_INLINE_CACHE: 1
-        # Pass build arguments for environment variables
         OPENAI_API_KEY: ${OPENAI_API_KEY}
         ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-        QDRANT_URL: http://qdrant:6333
-        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
         MCP_DB_PATH: /data/mcp_config.duckdb
+        VECTOR_DB_PATH: /data/mao_vectors.duckdb
         MCP_CONFIG_PATH: ${MCP_CONFIG_PATH:-/app/mcp.json}
         OLLAMA_HOST: http://ollama:11434
     ports:
       - "8000:8000"
     environment:
-      - QDRANT_URL=http://qdrant:6333
       - OLLAMA_HOST=http://ollama:11434
       - MCP_DB_PATH=/data/mcp_config.duckdb
+      - VECTOR_DB_PATH=/data/mao_vectors.duckdb
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
       - MCP_CONFIG_PATH=${MCP_CONFIG_PATH:-/app/mcp.json}
     volumes:
       - ./data:/data
       - ./mcp.json:/app/mcp.json
     depends_on:
-      - qdrant
       - ollama
-    restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
   ollama:
@@ -57,5 +43,4 @@ services:
               capabilities: [gpu]
 
 volumes:
-  qdrant_data:
   ollama_data:

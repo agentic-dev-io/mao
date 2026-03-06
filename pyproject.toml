@@ -12,7 +12,6 @@ dependencies = [
     "uvicorn>=0.34.0",
     "pydantic>=2.11.0",
     "pydantic-core>=2.16.1",
-    "qdrant-client>=1.14.0",
     "duckdb>=1.2.0",
     "httpx>=0.28.0",
     "python-dotenv>=1.1.0",

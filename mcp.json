@@ -1,5 +1,9 @@
 {
   "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
     "context7": {
       "command": "npx",
       "args": [
@@ -10,31 +14,6 @@
       ],
       "env": {
         "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
-      }
-    },
-    "dockerailabs": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "alpine/socat",
-        "STDIO",
-        "TCP:host.docker.internal:8811"
-      ]
-    },
-    "perplexity-ask": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "PERPLEXITY_API_KEY",
-        "mcp/perplexity-ask"
-      ],
-      "env": {
-        "PERPLEXITY_API_KEY": "${PERPLEXITY_API_KEY}"
       }
     }
   }
