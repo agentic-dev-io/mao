@@ -66,9 +66,6 @@ async def create_and_start_agent(
         model_name=agent_config["model_name"],
         agent_name=agent_config["name"],
         system_prompt=agent_config.get("system_prompt"),
-        use_react_agent=agent_config.get("use_react_agent", True),
-        max_tokens_trimmed=agent_config.get("max_tokens_trimmed", 3000),
-        llm_specific_kwargs=agent_config.get("llm_specific_kwargs"),
         tools=tools,
     )
 

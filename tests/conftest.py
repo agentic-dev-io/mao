@@ -12,7 +12,6 @@ import time
 import threading
 import uvicorn
 from dotenv import load_dotenv
-from mao.storage import KnowledgeTree, ExperienceTree
 from mao.mcp import MCPClient
 from fastapi.testclient import TestClient
 from mao.api.api import MCPAgentsAPI
@@ -23,30 +22,6 @@ try:
     from pytest_asyncio import fixture as asyncio_fixture
 except ImportError:
     asyncio_fixture = pytest.fixture  # type: ignore
-
-
-@asyncio_fixture(scope="function")
-async def knowledge_tree():
-    tree = await KnowledgeTree.create(
-        db_path=":memory:",
-        collection_name="test_knowledge_collection",
-        recreate_on_dim_mismatch=True,
-    )
-    await tree.clear_all_points_async()
-    yield tree
-    await tree.clear_all_points_async()
-
-
-@asyncio_fixture(scope="function")
-async def experience_tree():
-    tree = await ExperienceTree.create(
-        db_path=":memory:",
-        collection_name="test_experience_collection",
-        recreate_on_dim_mismatch=True,
-    )
-    await tree.clear_all_points_async()
-    yield tree
-    await tree.clear_all_points_async()
 
 
 @asyncio_fixture(scope="function")
