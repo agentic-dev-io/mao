@@ -267,6 +267,7 @@ class Agent:
 
         if self.experience_tree:
             et = self.experience_tree
+            kt = self.knowledge_tree
 
             @tool
             async def retrieve_experience(query: str) -> str:
@@ -281,6 +282,25 @@ class Agent:
                 return "\n".join(h["page_content"] for h in hits)
 
             tools.append(retrieve_experience)
+
+            @tool
+            async def save_experience(summary: str) -> str:
+                """Save a summary of what was learned or accomplished for future reference.
+
+                Args:
+                    summary: Brief summary of the interaction outcome or lesson learned
+                """
+                knowledge_id = None
+                if kt:
+                    hits = await kt.search_async(summary, k=1)
+                    if hits:
+                        knowledge_id = hits[0].get("id")
+                await et.learn_from_experience_async(
+                    summary, related_knowledge_id=knowledge_id
+                )
+                return "Experience saved."
+
+            tools.append(save_experience)
 
         return tools
 
