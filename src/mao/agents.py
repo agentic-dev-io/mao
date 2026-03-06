@@ -12,7 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, trim_messages
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -85,8 +85,54 @@ def _ensure_str(val: Any) -> str:
     return str(val)
 
 
+def _dict_to_tool(d: dict[str, Any]) -> BaseTool:
+    from pydantic import Field, create_model
+
+    params = d.get("parameters", {})
+    properties = params.get("properties", {})
+    required = params.get("required", [])
+
+    fields = {}
+    for prop_name, prop_schema in properties.items():
+        field_type = str
+        prop_type = prop_schema.get("type", "string")
+        if prop_type == "integer":
+            field_type = int
+        elif prop_type == "number":
+            field_type = float
+        elif prop_type == "boolean":
+            field_type = bool
+        elif prop_type == "array":
+            field_type = list
+
+        default = ... if prop_name in required else None
+        desc = prop_schema.get("description", "")
+        fields[prop_name] = (field_type, Field(default=default, description=desc))
+
+    if not fields:
+        fields["input"] = (str, Field(description="Input for the tool"))
+
+    input_model = create_model(f"{d['name']}_Input", **fields)
+
+    return StructuredTool.from_function(
+        func=lambda **kwargs: f"Tool '{d['name']}' called with: {kwargs}",
+        name=d["name"],
+        description=d.get("description", ""),
+        args_schema=input_model,
+    )
+
+
 def _dicts_to_tools(tools: list[Any]) -> list[Any]:
-    return [t for t in tools if callable(t) or isinstance(t, BaseTool)]
+    result = []
+    for t in tools:
+        if callable(t) or isinstance(t, BaseTool):
+            result.append(t)
+        elif isinstance(t, dict) and "name" in t:
+            try:
+                result.append(_dict_to_tool(t))
+            except Exception as e:
+                logger.warning("Failed to convert dict tool '%s': %s", t.get("name"), e)
+    return result
 
 
 class Agent:
@@ -200,6 +246,44 @@ class Agent:
             logger.error("Agent '%s' model call failed: %s", self.name, e, exc_info=True)
             raise
 
+    def _build_rag_tools(self) -> list[BaseTool]:
+        tools: list[BaseTool] = []
+        if self.knowledge_tree:
+            kt = self.knowledge_tree
+
+            @tool
+            async def retrieve_knowledge(query: str) -> str:
+                """Search the agent's knowledge base for relevant information.
+
+                Args:
+                    query: Search query to find relevant knowledge
+                """
+                hits = await kt.search_async(query, k=3)
+                if not hits:
+                    return "No relevant knowledge found."
+                return "\n".join(h["page_content"] for h in hits)
+
+            tools.append(retrieve_knowledge)
+
+        if self.experience_tree:
+            et = self.experience_tree
+
+            @tool
+            async def retrieve_experience(query: str) -> str:
+                """Search the agent's past experiences for relevant context.
+
+                Args:
+                    query: Search query to find relevant past experiences
+                """
+                hits = await et.search_async(query, k=3)
+                if not hits:
+                    return "No relevant experience found."
+                return "\n".join(h["page_content"] for h in hits)
+
+            tools.append(retrieve_experience)
+
+        return tools
+
     async def init_agent(self):
         try:
             safe_name = self.name.replace("-", "_").replace(" ", "_")
@@ -211,12 +295,15 @@ class Agent:
             )
 
             self.loaded_tools = await self._load_mcp_tools()
-            logger.info("Agent '%s' loaded %d tools", self.name, len(self.loaded_tools))
+            rag_tools = self._build_rag_tools()
+            self.loaded_tools.extend(rag_tools)
+            logger.info("Agent '%s' loaded %d tools (%d RAG)", self.name, len(self.loaded_tools), len(rag_tools))
 
             if self.loaded_tools:
+                all_tools = _dicts_to_tools(self.loaded_tools)
                 self.agent_runnable = lc_create_agent(
                     model=self.llm,
-                    tools=self.loaded_tools,
+                    tools=all_tools,
                     system_prompt=self.system_prompt,
                     checkpointer=self.memory,
                     name=self.name,
