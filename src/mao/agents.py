@@ -1,15 +1,14 @@
 """Agent classes with Agent, Supervisor, and create_agent factory."""
 
-import asyncio
 import logging
 import os
+import uuid
 from typing import Any
 
 from dotenv import load_dotenv
 
 from langchain.agents import create_agent as lc_create_agent
 from langchain.chat_models import init_chat_model
-from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, trim_messages
 from langchain_core.runnables import RunnableConfig
@@ -33,41 +32,6 @@ from mao.storage import ExperienceTree, KnowledgeTree
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-
-def get_default_callbacks() -> list[BaseCallbackHandler]:
-    tracer = None
-    try:
-        from langchain.callbacks.tracers import LangChainTracer
-
-        if os.environ.get("LANGSMITH_TRACING") == "true" and os.environ.get(
-            "LANGSMITH_API_KEY"
-        ):
-            tracer = LangChainTracer(
-                project_name=os.environ.get("LANGSMITH_PROJECT", "mcp-agents")
-            )
-    except ImportError:
-        pass
-    if tracer:
-        return [tracer]
-
-    class LoggingCallbackHandler(BaseCallbackHandler):
-        def on_chain_end(self, outputs, **kwargs):
-            logger.info("Chain finished: %s", outputs)
-
-        def on_chain_error(self, error, **kwargs):
-            logger.error("Chain error: %s", error)
-
-        def on_llm_end(self, response, **kwargs):
-            logger.info("LLM finished: %s", response)
-
-        def on_llm_error(self, error, **kwargs):
-            logger.error("LLM error: %s", error)
-
-    return [LoggingCallbackHandler()]
-
-
-DEFAULT_CALLBACKS = get_default_callbacks()
 
 
 def _create_model(
@@ -106,31 +70,11 @@ async def load_mcp_tools(
         return []
 
 
-async def _process_llm_response(
-    response: Any,
-    stream: bool,
-    streamed_content: str = "",
-) -> tuple[BaseMessage, str]:
-    content_str: str
-
+async def _process_llm_response(response: Any) -> tuple[BaseMessage, str]:
     if isinstance(response, AIMessage):
-        message = response
-        content_str = str(message.content or streamed_content)
-    elif isinstance(response, str):
-        message = AIMessage(content=response)
-        content_str = response
-    elif isinstance(response, (list, dict)):
-        message = AIMessage(content=str(response))
-        content_str = str(response)
-    else:
-        message = AIMessage(content=str(response))
-        content_str = str(response)
-
-    if stream and streamed_content and not message.content:
-        message.content = streamed_content
-        content_str = streamed_content
-
-    return message, content_str
+        return response, str(response.content)
+    content = str(response)
+    return AIMessage(content=content), content
 
 
 def _ensure_str(val: Any) -> str:
@@ -171,12 +115,7 @@ class Agent:
     async def _retrieve_context(self, query: str, k: int = 3) -> str:
         context_parts = []
         if self.knowledge_tree:
-            try:
-                knowledge_hits = await self.knowledge_tree.search_async(query, k=k)
-            except AttributeError:
-                knowledge_hits = await asyncio.to_thread(
-                    self.knowledge_tree.search, query, k=k
-                )
+            knowledge_hits = await self.knowledge_tree.search_async(query, k=k)
             if knowledge_hits:
                 context_parts.append(
                     "\nRelevant Knowledge:\n"
@@ -184,12 +123,7 @@ class Agent:
                 )
 
         if self.experience_tree:
-            try:
-                experience_hits = await self.experience_tree.search_async(query, k=k)
-            except AttributeError:
-                experience_hits = await asyncio.to_thread(
-                    self.experience_tree.search, query, k=k
-                )
+            experience_hits = await self.experience_tree.search_async(query, k=k)
             if experience_hits:
                 context_parts.append(
                     "\nRelevant Experience:\n"
@@ -208,28 +142,15 @@ class Agent:
 
         knowledge_id = None
         if self.knowledge_tree and user_input:
-            try:
-                knowledge_hits = await self.knowledge_tree.search_async(user_input, k=1)
-            except AttributeError:
-                knowledge_hits = await asyncio.to_thread(
-                    self.knowledge_tree.search, user_input, k=1
-                )
+            knowledge_hits = await self.knowledge_tree.search_async(user_input, k=1)
             if knowledge_hits:
                 knowledge_id = knowledge_hits[0].get("id")
 
         exp_text = f"User: {user_input}\nAgent: {model_output_str}"
 
-        try:
-            await self.experience_tree.learn_from_experience_async(
-                exp_text, related_knowledge_id=knowledge_id, tags=tags
-            )
-        except AttributeError:
-            await asyncio.to_thread(
-                self.experience_tree.learn_from_experience,
-                exp_text,
-                related_knowledge_id=knowledge_id,
-                tags=tags,
-            )
+        await self.experience_tree.learn_from_experience_async(
+            exp_text, related_knowledge_id=knowledge_id, tags=tags
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -256,7 +177,8 @@ class Agent:
                 include_system=True,
                 start_on="human",
             )
-        except (ImportError, Exception):
+        except Exception:
+            logger.warning("Message trimming failed, using last 20 messages")
             trimmed_messages_list = list(state["messages"][-20:])
         messages_for_llm: list[BaseMessage] = [
             SystemMessage(content=system_content)
@@ -270,8 +192,7 @@ class Agent:
 
             invoked_response = await llm.ainvoke(messages_for_llm, config=config)
             response_message, learn_content = await _process_llm_response(
-                invoked_response if invoked_response else "",
-                self.stream,
+                invoked_response,
             )
             await self._learn_experience(user_input, learn_content)
             return {"messages": [response_message]}
@@ -366,13 +287,9 @@ class Supervisor:
             tools = _dicts_to_tools(await self._load_supervisor_mcp_tools())
             logger.info("Supervisor loaded %d tools", len(tools))
 
-            llm = self.llm
-            if tools and hasattr(llm, "bind_tools"):
-                llm = llm.bind_tools(tools)
-
             workflow = create_supervisor(
                 self.agents,
-                model=llm,
+                model=self.llm,
                 prompt=self.prompt,
                 tools=tools if tools else None,
                 **self.supervisor_kwargs,
@@ -399,7 +316,7 @@ class Supervisor:
             raise RuntimeError(
                 "Supervisor must be initialized. Call init_supervisor() first."
             )
-        config_dict = {"configurable": {"thread_id": thread_id}} if thread_id else {}
+        config_dict = {"configurable": {"thread_id": thread_id or uuid.uuid4().hex}}
         return await self.app.ainvoke({"messages": messages}, config=config_dict)
 
 

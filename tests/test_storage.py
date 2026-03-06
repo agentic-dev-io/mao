@@ -4,6 +4,37 @@ Tests for the storage module (DuckDB-based vector stores).
 
 import pytest
 
+from mao.storage import KnowledgeTree, ExperienceTree
+
+try:
+    from pytest_asyncio import fixture as asyncio_fixture
+except ImportError:
+    asyncio_fixture = pytest.fixture  # type: ignore
+
+
+@asyncio_fixture(scope="function")
+async def knowledge_tree():
+    tree = await KnowledgeTree.create(
+        db_path=":memory:",
+        collection_name="test_knowledge_collection",
+        recreate_on_dim_mismatch=True,
+    )
+    await tree.clear_all_points_async()
+    yield tree
+    await tree.clear_all_points_async()
+
+
+@asyncio_fixture(scope="function")
+async def experience_tree():
+    tree = await ExperienceTree.create(
+        db_path=":memory:",
+        collection_name="test_experience_collection",
+        recreate_on_dim_mismatch=True,
+    )
+    await tree.clear_all_points_async()
+    yield tree
+    await tree.clear_all_points_async()
+
 
 @pytest.mark.asyncio
 async def test_knowledge_tree_basic_operations(knowledge_tree):

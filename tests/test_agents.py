@@ -11,14 +11,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from mao.agents import create_agent, Supervisor, load_mcp_tools
 
-# Import pytest_asyncio if available
-try:
-    import pytest_asyncio
-
-    ASYNCIO_FIXTURE = pytest_asyncio.fixture
-except ImportError:
-    ASYNCIO_FIXTURE = pytest.fixture  # type: ignore
-
 # Configuration for tests — defaults to Ollama (local/cloud)
 TEST_LLM_PROVIDER = os.environ.get("TEST_LLM_PROVIDER", "ollama")
 TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
