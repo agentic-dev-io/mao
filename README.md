@@ -78,7 +78,7 @@ experience_tree = await ExperienceTree.create(collection_name="agent-experience"
 # Create an agent
 agent_app = await create_agent(
     provider="anthropic",
-    model_name="claude-3-opus-20240229",
+    model_name="claude-opus-4-6",
     agent_name="assistant",
     knowledge_tree=knowledge_tree,
     experience_tree=experience_tree,
@@ -200,7 +200,7 @@ async with httpx.AsyncClient() as client:
         json={
             "name": "research_assistant",
             "provider": "anthropic",
-            "model_name": "claude-3-opus-20240229",
+            "model_name": "claude-opus-4-6",
             "system_prompt": "You are a research assistant."
         }
     )
