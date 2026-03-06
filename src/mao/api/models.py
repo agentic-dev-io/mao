@@ -20,13 +20,6 @@ class AgentCreate(BaseModel):
     system_prompt: Optional[str] = Field(
         None, description="System prompt for the agent"
     )
-    use_react_agent: bool = Field(True, description="Whether to use ReAct agent")
-    max_tokens_trimmed: int = Field(
-        3000, description="Maximum tokens to keep in context"
-    )
-    llm_specific_kwargs: Optional[Dict[str, Any]] = Field(
-        None, description="Provider-specific arguments"
-    )
 
 
 class AgentUpdate(BaseModel):
@@ -40,15 +33,6 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = Field(
         None, description="System prompt for the agent"
     )
-    use_react_agent: Optional[bool] = Field(
-        None, description="Whether to use ReAct agent"
-    )
-    max_tokens_trimmed: Optional[int] = Field(
-        None, description="Maximum tokens to keep in context"
-    )
-    llm_specific_kwargs: Optional[Dict[str, Any]] = Field(
-        None, description="Provider-specific arguments"
-    )
 
 
 class AgentResponse(BaseModel):
@@ -59,9 +43,6 @@ class AgentResponse(BaseModel):
     provider: str
     model_name: str
     system_prompt: Optional[str] = None
-    use_react_agent: bool
-    max_tokens_trimmed: int
-    llm_specific_kwargs: Optional[Dict[str, Any]] = None
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
 
@@ -373,6 +354,12 @@ class AgentMessage(BaseModel):
     thread_id: Optional[str] = Field(
         None, description="Thread ID for conversation tracking"
     )
+    response_schema: Optional[Dict[str, Any]] = Field(
+        None, description="Optional JSON schema for structured output"
+    )
+    approval_decisions: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Optional HITL approval/edit/reject decisions to resume execution"
+    )
 
 
 class AgentResponseMessage(BaseModel):
@@ -403,6 +390,12 @@ class TeamMessage(BaseModel):
     )
     metadata: Optional[Dict[str, Any]] = Field(
         None, description="Additional metadata for the message"
+    )
+    response_schema: Optional[Dict[str, Any]] = Field(
+        None, description="Optional JSON schema for structured output"
+    )
+    approval_decisions: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Optional HITL approval/edit/reject decisions to resume execution"
     )
 
 

@@ -6,10 +6,11 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from langgraph.types import Command
 
 from .api import active_agents, get_config_db
 from .db import ConfigDB
-from .helpers import create_and_start_agent
+from .helpers import create_and_start_agent, extract_response_text
 from .models import (
     AgentCreate,
     AgentMessage,
@@ -18,6 +19,7 @@ from .models import (
     AgentUpdate,
     ToolResponse,
 )
+from ..agents import _build_invoke_config
 
 # Create router
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -35,9 +37,6 @@ async def create_new_agent(agent: AgentCreate, db: ConfigDB = Depends(get_config
         provider=agent.provider,
         model_name=agent.model_name,
         system_prompt=agent.system_prompt,
-        use_react_agent=agent.use_react_agent,
-        max_tokens_trimmed=agent.max_tokens_trimmed,
-        llm_specific_kwargs=agent.llm_specific_kwargs,
     )
 
     return await db.get_agent(agent_id)
@@ -172,29 +171,27 @@ async def chat_with_agent(
     thread_id = message.thread_id or f"thread_{uuid.uuid4().hex}"
 
     try:
-        # Send message to agent
-        response = await agent_app.ainvoke(
-            {"messages": [formatted_message]},
-            config={"configurable": {"thread_id": thread_id}},
+        config = _build_invoke_config(
+            thread_id=thread_id,
+            run_name="agent_chat",
+            tags=["mao", "agent", agent_id],
+            metadata={"agent_id": agent_id},
         )
+        if message.approval_decisions:
+            response = await agent_app.ainvoke(
+                Command(resume={"decisions": message.approval_decisions}),
+                config=config,
+            )
+        else:
+            response = await agent_app.ainvoke(
+                {"messages": [formatted_message], "response_schema": message.response_schema},
+                config=config,
+            )
 
         # Extract response
         response_message = "No response received."
         if response:
-            if (
-                isinstance(response, dict)
-                and "messages" in response
-                and response["messages"]
-            ):
-                last_message = response["messages"][-1]
-                if hasattr(last_message, "content"):
-                    response_message = last_message.content
-                elif isinstance(last_message, dict) and "content" in last_message:
-                    response_message = last_message["content"]
-            elif hasattr(response, "content"):
-                response_message = response.content
-            elif isinstance(response, str):
-                response_message = response
+            response_message, _ = extract_response_text(response)
     except Exception as e:
         logging.error(f"Error invoking agent {agent_id}: {e}")
         raise HTTPException(

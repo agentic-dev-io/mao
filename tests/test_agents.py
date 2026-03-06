@@ -19,14 +19,22 @@ TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
 @pytest.fixture(autouse=True)
 def isolated_vector_db():
     previous_vector_db_path = os.environ.get("VECTOR_DB_PATH")
+    previous_checkpoint_db_path = os.environ.get("MAO_CHECKPOINT_DB_PATH")
     base_tmp_dir = os.path.join(os.getcwd(), ".test_tmp")
     os.makedirs(base_tmp_dir, exist_ok=True)
     os.environ["VECTOR_DB_PATH"] = os.path.join(
         base_tmp_dir, f"agent_vectors_{uuid.uuid4().hex}.duckdb"
     )
+    os.environ["MAO_CHECKPOINT_DB_PATH"] = os.path.join(
+        base_tmp_dir, f"agent_checkpoints_{uuid.uuid4().hex}.duckdb"
+    )
     try:
         yield
     finally:
+        if previous_checkpoint_db_path is None:
+            os.environ.pop("MAO_CHECKPOINT_DB_PATH", None)
+        else:
+            os.environ["MAO_CHECKPOINT_DB_PATH"] = previous_checkpoint_db_path
         if previous_vector_db_path is None:
             os.environ.pop("VECTOR_DB_PATH", None)
         else:

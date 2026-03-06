@@ -12,6 +12,36 @@ from .db import ConfigDB
 logger = logging.getLogger(__name__)
 
 
+def response_was_interrupted(response: Any) -> bool:
+    return isinstance(response, dict) and bool(response.get("__interrupt__"))
+
+
+def extract_response_text(response: Any) -> tuple[str, str | None]:
+    if response_was_interrupted(response):
+        return "Approval required.", _extract_responding_agent_id(response)
+    if isinstance(response, dict) and response.get("messages"):
+        last_message = response["messages"][-1]
+        if hasattr(last_message, "content"):
+            return str(last_message.content), getattr(last_message, "name", None)
+        if isinstance(last_message, dict):
+            return str(last_message.get("content", "")), last_message.get("name")
+    if hasattr(response, "content"):
+        return str(response.content), getattr(response, "name", None)
+    return str(response), None
+
+
+def _extract_responding_agent_id(response: Any) -> str | None:
+    if isinstance(response, dict) and response.get("messages"):
+        last_message = response["messages"][-1]
+        if hasattr(last_message, "name"):
+            return getattr(last_message, "name", None)
+        if isinstance(last_message, dict):
+            return last_message.get("name")
+    if hasattr(response, "name"):
+        return getattr(response, "name", None)
+    return None
+
+
 def _db_server_to_mcp_config(server: dict[str, Any]) -> dict[str, Any]:
     config: dict[str, Any] = {"transport": server["transport"]}
     for key in ("url", "command", "args", "headers", "timeout"):

@@ -29,6 +29,14 @@ class ConfigDB:
     _instances: dict[str, "ConfigDB"] = {}
     _lock = asyncio.Lock()
     _lock = asyncio.Lock()
+    _agent_select_columns = (
+        "id, name, provider, model_name, system_prompt, created_at, updated_at"
+    )
+    _agent_legacy_columns = (
+        "use_react_agent",
+        "max_tokens_trimmed",
+        "llm_specific_kwargs",
+    )
 
     @classmethod
     async def get_instance(cls, db_path: str = "mcp_config.duckdb") -> "ConfigDB":
@@ -104,9 +112,6 @@ class ConfigDB:
                 provider VARCHAR NOT NULL,
                 model_name VARCHAR NOT NULL,
                 system_prompt TEXT,
-                use_react_agent BOOLEAN DEFAULT TRUE,
-                max_tokens_trimmed INTEGER DEFAULT 3000,
-                llm_specific_kwargs JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -215,6 +220,34 @@ class ConfigDB:
             )
             """)
 
+            self._migrate_agents_table(conn)
+
+    def _migrate_agents_table(self, conn):
+        """Normalize agents schema to the simplified API columns."""
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info('agents')").fetchall()
+        }
+
+        required_columns = {
+            "id": "VARCHAR",
+            "name": "VARCHAR NOT NULL DEFAULT ''",
+            "provider": "VARCHAR NOT NULL DEFAULT ''",
+            "model_name": "VARCHAR NOT NULL DEFAULT ''",
+            "system_prompt": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE agents ADD COLUMN {column_name} {column_type}"
+                )
+
+        for column_name in self._agent_legacy_columns:
+            if column_name in existing_columns:
+                conn.execute(f"ALTER TABLE agents DROP COLUMN {column_name}")
+
     def _process_result(self, result: tuple | Any, table_name: str) -> dict[str, Any]:
         """Process a database result into a dictionary"""
         if result is None:
@@ -228,9 +261,6 @@ class ConfigDB:
                 "provider",
                 "model_name",
                 "system_prompt",
-                "use_react_agent",
-                "max_tokens_trimmed",
-                "llm_specific_kwargs",
                 "created_at",
                 "updated_at",
             ],
@@ -320,7 +350,6 @@ class ConfigDB:
 
         # Process JSON fields
         json_fields = [
-            "llm_specific_kwargs",
             "config",
             "params",
             "args",
@@ -385,9 +414,6 @@ class ConfigDB:
         provider: str,
         model_name: str,
         system_prompt: str | None = None,
-        use_react_agent: bool = True,
-        max_tokens_trimmed: int = 3000,
-        llm_specific_kwargs: dict[str, Any] | None = None,
     ) -> str:
         """
         Create a new agent configuration asynchronously.
@@ -398,22 +424,14 @@ class ConfigDB:
             provider: LLM provider (openai, anthropic, etc.)
             model_name: Model name to use
             system_prompt: System prompt for the agent
-            use_react_agent: Whether to use ReAct agent
-            max_tokens_trimmed: Maximum tokens to keep in context
-            llm_specific_kwargs: Provider-specific arguments
-
         Returns:
             The agent_id of the created agent
         """
         async with self.async_connection() as conn:
-            kwargs_json = (
-                json.dumps(llm_specific_kwargs) if llm_specific_kwargs else None
-            )
-
             conn.execute(
                 """
-            INSERT INTO agents (id, name, provider, model_name, system_prompt, use_react_agent, max_tokens_trimmed, llm_specific_kwargs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, name, provider, model_name, system_prompt)
+            VALUES (?, ?, ?, ?, ?)
             """,
                 [
                     agent_id,
@@ -421,9 +439,6 @@ class ConfigDB:
                     provider,
                     model_name,
                     system_prompt,
-                    use_react_agent,
-                    max_tokens_trimmed,
-                    kwargs_json,
                 ],
             )
 
@@ -433,7 +448,8 @@ class ConfigDB:
         """Gets an agent by ID asynchronously"""
         async with self.async_connection() as conn:
             result = conn.execute(
-                "SELECT * FROM agents WHERE id = ?", [agent_id]
+                f"SELECT {self._agent_select_columns} FROM agents WHERE id = ?",
+                [agent_id],
             ).fetchone()
 
             if not result:
@@ -449,7 +465,7 @@ class ConfigDB:
     ) -> list[dict[str, Any]]:
         """Lists all agents asynchronously, with optional pagination"""
         async with self.async_connection() as conn:
-            query = "SELECT * FROM agents"
+            query = f"SELECT {self._agent_select_columns} FROM agents"
             params: list[Any] = []
 
             if limit is not None:
@@ -474,7 +490,7 @@ class ConfigDB:
 
         async with self.async_connection() as conn:
             query, params = self._build_update_query(
-                "agents", "id", agent_id, ["llm_specific_kwargs"], **kwargs
+                "agents", "id", agent_id, [], **kwargs
             )
             conn.execute(query, params)
             return True
@@ -1048,9 +1064,6 @@ class ConfigDB:
         provider: str,
         model_name: str,
         system_prompt: str | None = None,
-        use_react_agent: bool = True,
-        max_tokens_trimmed: int = 3000,
-        llm_specific_kwargs: dict[str, Any] | None = None,
     ) -> str:
         """
         Create a new agent configuration.
@@ -1061,22 +1074,14 @@ class ConfigDB:
             provider: LLM provider (openai, anthropic, etc.)
             model_name: Model name to use
             system_prompt: System prompt for the agent
-            use_react_agent: Whether to use ReAct agent
-            max_tokens_trimmed: Maximum tokens to keep in context
-            llm_specific_kwargs: Provider-specific arguments
-
         Returns:
             The agent_id of the created agent
         """
         with self.connection() as conn:
-            kwargs_json = (
-                json.dumps(llm_specific_kwargs) if llm_specific_kwargs else None
-            )
-
             conn.execute(
                 """
-            INSERT INTO agents (id, name, provider, model_name, system_prompt, use_react_agent, max_tokens_trimmed, llm_specific_kwargs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, name, provider, model_name, system_prompt)
+            VALUES (?, ?, ?, ?, ?)
             """,
                 [
                     agent_id,
@@ -1084,9 +1089,6 @@ class ConfigDB:
                     provider,
                     model_name,
                     system_prompt,
-                    use_react_agent,
-                    max_tokens_trimmed,
-                    kwargs_json,
                 ],
             )
 

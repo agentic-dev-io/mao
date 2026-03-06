@@ -6,6 +6,9 @@ Production-ready, async, and robust implementation.
 import pytest
 import asyncio
 import logging
+import os
+import pathlib
+import uuid
 from unittest.mock import patch, MagicMock, mock_open
 from mao.mcp import (
     MCPClient,
@@ -289,3 +292,66 @@ def test_mcp_client_custom_tool_states():
     # Verify custom tool states were used
     assert client.is_tool_enabled("tool1") is True
     assert client.is_tool_enabled("tool2") is False
+
+
+def _make_local_tmp_dir() -> pathlib.Path:
+    tmp_dir = pathlib.Path.cwd() / ".test_tmp" / f"mcp_path_{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir
+
+
+def test_mcp_client_prefers_dot_mcp_json():
+    """Test MCPClient prefers .mcp.json over mcp.json when both exist."""
+    tmp_path = _make_local_tmp_dir()
+    dot_config = tmp_path / ".mcp.json"
+    plain_config = tmp_path / "mcp.json"
+    dot_config.write_text(
+        '{"mcpServers": {"dot_server": {"transport": "stdio", "command": "python", "args": ["-m", "dot_server"]}}}',
+        encoding="utf-8",
+    )
+    plain_config.write_text(
+        '{"mcpServers": {"plain_server": {"transport": "stdio", "command": "python", "args": ["-m", "plain_server"]}}}',
+        encoding="utf-8",
+    )
+
+    with patch.object(MCPClient, "_load_config", return_value={"mcpServers": {}}):
+        client = MCPClient(config=None)
+        client.project_root = tmp_path
+        resolved = client._resolve_config_file_path(None)
+
+    assert resolved == dot_config
+
+
+def test_mcp_client_falls_back_to_mcp_json():
+    """Test MCPClient falls back to mcp.json when .mcp.json is absent."""
+    tmp_path = _make_local_tmp_dir()
+    plain_config = tmp_path / "mcp.json"
+    plain_config.write_text(
+        '{"mcpServers": {"plain_server": {"transport": "stdio", "command": "python", "args": ["-m", "plain_server"]}}}',
+        encoding="utf-8",
+    )
+
+    with patch.object(MCPClient, "_load_config", return_value={"mcpServers": {}}):
+        client = MCPClient(config=None)
+        client.project_root = tmp_path
+        resolved = client._resolve_config_file_path(None)
+
+    assert resolved == plain_config
+
+
+def test_mcp_client_env_path_overrides_default():
+    """Test MCP_CONFIG_PATH takes precedence over default discovery."""
+    tmp_path = _make_local_tmp_dir()
+    env_config = tmp_path / "custom.json"
+    env_config.write_text(
+        '{"mcpServers": {"env_server": {"transport": "stdio", "command": "python", "args": ["-m", "env_server"]}}}',
+        encoding="utf-8",
+    )
+
+    with (
+        patch.dict(os.environ, {"MCP_CONFIG_PATH": str(env_config)}),
+        patch.object(MCPClient, "_load_config", return_value={"mcpServers": {}}),
+    ):
+        client = MCPClient(config=None)
+
+    assert client.config_file_path == env_config

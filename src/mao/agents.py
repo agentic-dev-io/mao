@@ -2,22 +2,25 @@
 
 import logging
 import os
+import json
 import uuid
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import Field, create_model
 
 from langchain.agents import create_agent as lc_create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse, OmitFromOutput
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, trim_messages
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, trim_messages
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, tool
 
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, MessagesState, StateGraph
-
-from langgraph_supervisor import create_supervisor
+from langgraph.runtime import Runtime
+from langgraph.types import Command
+from typing_extensions import Annotated, NotRequired
 
 from tenacity import (
     retry,
@@ -27,11 +30,116 @@ from tenacity import (
 )
 
 from mao.mcp import MCPClient
+from mao.checkpoint import get_checkpointer
 from mao.storage import ExperienceTree, KnowledgeTree
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+def _approximate_token_count(messages: list[BaseMessage]) -> int:
+    total_chars = 0
+    for message in messages:
+        total_chars += len(_ensure_str(message.content))
+    return max(1, total_chars // 4)
+
+
+class RuntimeAgentState(AgentState[Any]):
+    response_schema: NotRequired[Annotated[dict[str, Any] | None, OmitFromOutput]]
+
+
+class RetrievalLearningMiddleware(AgentMiddleware[RuntimeAgentState, None, Any]):
+    state_schema = RuntimeAgentState
+
+    def __init__(self, agent: "Agent") -> None:
+        super().__init__()
+        self.agent = agent
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[None],
+        handler,
+    ) -> ModelResponse[Any]:
+        state = request.state
+        messages = list(state.get("messages", []))
+        user_input = ""
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                user_input = _ensure_str(message.content)
+                break
+
+        context_str = _ensure_str(await self.agent._retrieve_context(user_input))
+        system_content = self.agent.system_prompt
+        if context_str:
+            system_content = f"{system_content}\n{context_str}"
+
+        try:
+            trimmed_messages = trim_messages(
+                messages,
+                max_tokens=3000,
+                strategy="last",
+                token_counter=_approximate_token_count,
+                include_system=True,
+                start_on="human",
+            )
+        except Exception:
+            logger.warning("Message trimming failed, using last 20 messages")
+            trimmed_messages = messages[-20:]
+
+        response_schema = state.get("response_schema")
+        return await handler(
+            request.override(
+                messages=trimmed_messages,
+                system_message=SystemMessage(content=system_content),
+                response_format=response_schema or request.response_format,
+            )
+        )
+
+    async def aafter_agent(self, state: RuntimeAgentState, runtime: Runtime[None]) -> None:
+        user_input = ""
+        for message in reversed(state.get("messages", [])):
+            if isinstance(message, HumanMessage):
+                user_input = _ensure_str(message.content)
+                break
+
+        learn_content: Any = ""
+        if "structured_response" in state:
+            learn_content = json.dumps(state["structured_response"], default=str)
+        else:
+            for message in reversed(state.get("messages", [])):
+                if isinstance(message, AIMessage):
+                    learn_content = _ensure_str(message.content)
+                    break
+
+        if user_input and learn_content:
+            await self.agent._learn_experience(user_input, learn_content)
+
+
+def _parse_hitl_tools() -> dict[str, dict[str, Any]]:
+    raw = os.environ.get("MAO_HITL_TOOLS", "").strip()
+    if not raw:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for tool_name in [item.strip() for item in raw.split(",") if item.strip()]:
+        result[tool_name] = {"allowed_decisions": ["approve", "edit", "reject"]}
+    return result
+
+
+def _build_invoke_config(
+    *,
+    thread_id: str,
+    run_name: str,
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> RunnableConfig:
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    if tags:
+        config["tags"] = tags
+    if metadata:
+        config["metadata"] = metadata
+    config["run_name"] = run_name
+    return config
 
 
 def _create_model(
@@ -151,10 +259,9 @@ class Agent:
         self.system_prompt = system_prompt or "You are a helpful assistant."
         self.knowledge_tree: KnowledgeTree | None = None
         self.experience_tree: ExperienceTree | None = None
-        self.memory = MemorySaver()
+        self.memory = get_checkpointer()
         self.stream = stream
         self.agent_runnable = None
-        self.tool_agent_runnable = None
 
     async def _load_mcp_tools(self) -> list[dict[str, Any]]:
         return await load_mcp_tools(self.configured_tools)
@@ -198,86 +305,6 @@ class Agent:
         await self.experience_tree.learn_from_experience_async(
             exp_text, related_knowledge_id=knowledge_id, tags=tags
         )
-
-    async def _build_messages_for_llm(self, state: MessagesState) -> tuple[list[BaseMessage], str]:
-        user_input_raw = state["messages"][-1].content if state["messages"] else ""
-        user_input = _ensure_str(user_input_raw)
-        context_str = _ensure_str(await self._retrieve_context(user_input))
-
-        system_content = self.system_prompt
-        if context_str:
-            system_content = f"{system_content}\n{context_str}"
-
-        try:
-            trimmed_messages_list = trim_messages(
-                state["messages"],
-                max_tokens=3000,
-                strategy="last",
-                token_counter=self.llm,
-                include_system=True,
-                start_on="human",
-            )
-        except Exception:
-            logger.warning("Message trimming failed, using last 20 messages")
-            trimmed_messages_list = list(state["messages"][-20:])
-        messages_for_llm: list[BaseMessage] = [
-            SystemMessage(content=system_content)
-        ] + trimmed_messages_list
-        return messages_for_llm, user_input
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
-    )
-    async def _call_model_node(
-        self, state: MessagesState, config: RunnableConfig | None = None
-    ) -> dict[str, list[BaseMessage]]:
-        messages_for_llm, user_input = await self._build_messages_for_llm(state)
-
-        try:
-            llm = self.llm
-            invoked_response = await llm.ainvoke(messages_for_llm, config=config)
-            response_message, learn_content = await _process_llm_response(
-                invoked_response,
-            )
-            await self._learn_experience(user_input, learn_content)
-            return {"messages": [response_message]}
-        except Exception as e:
-            logger.error("Agent '%s' model call failed: %s", self.name, e, exc_info=True)
-            raise
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
-    )
-    async def _call_agent_node(
-        self, state: MessagesState, config: RunnableConfig | None = None
-    ) -> dict[str, list[BaseMessage]]:
-        if self.tool_agent_runnable is None:
-            raise RuntimeError("Agent runnable not initialized.")
-
-        messages_for_llm, user_input = await self._build_messages_for_llm(state)
-
-        try:
-            response = await self.tool_agent_runnable.ainvoke(
-                {"messages": messages_for_llm},
-                config=config,
-            )
-            if isinstance(response, dict) and response.get("messages"):
-                response_message = response["messages"][-1]
-            else:
-                response_message = response
-
-            processed_message, learn_content = await _process_llm_response(
-                response_message,
-            )
-            await self._learn_experience(user_input, learn_content)
-            return {"messages": [processed_message]}
-        except Exception as e:
-            logger.error("Agent '%s' tool call failed: %s", self.name, e, exc_info=True)
-            raise
 
     def _build_rag_tools(self) -> list[BaseTool]:
         tools: list[BaseTool] = []
@@ -351,33 +378,22 @@ class Agent:
             rag_tools = self._build_rag_tools()
             self.loaded_tools.extend(rag_tools)
             logger.info("Agent '%s' loaded %d tools (%d RAG)", self.name, len(self.loaded_tools), len(rag_tools))
+            all_tools = _dicts_to_tools(self.loaded_tools)
+            middleware: list[Any] = [RetrievalLearningMiddleware(self)]
+            interrupt_on = _parse_hitl_tools()
+            if interrupt_on:
+                middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
 
-            workflow = StateGraph(MessagesState)
-            if self.loaded_tools:
-                all_tools = _dicts_to_tools(self.loaded_tools)
-                self.tool_agent_runnable = lc_create_agent(
-                    model=self.llm,
-                    tools=all_tools,
-                    system_prompt=self.system_prompt,
-                    name=self.name,
-                )
-                workflow.add_node("agent_node", self._call_agent_node)
-                logger.info(
-                    "Agent '%s' created with create_agent and %d tools.",
-                    self.name,
-                    len(self.loaded_tools),
-                )
-                workflow.add_edge(START, "agent_node")
-                workflow.add_edge("agent_node", END)
-            else:
-                workflow.add_node("model_node", self._call_model_node)
-                workflow.add_edge(START, "model_node")
-                workflow.add_edge("model_node", END)
-
-            self.agent_runnable = workflow.compile(
-                checkpointer=self.memory, name=self.name
+            self.agent_runnable = lc_create_agent(
+                model=self.llm,
+                tools=all_tools,
+                system_prompt=self.system_prompt,
+                middleware=middleware,
+                checkpointer=self.memory,
+                name=self.name,
+                state_schema=RuntimeAgentState,
             )
-            logger.info("Agent '%s' compiled as custom graph.", self.name)
+            logger.info("Agent '%s' compiled with %d tools.", self.name, len(all_tools))
             return self.agent_runnable
         except Exception as e:
             logger.error("Failed to initialize agent '%s': %s", self.name, e, exc_info=True)
@@ -412,11 +428,81 @@ class Supervisor:
             "parallel_tool_calls": parallel_tool_calls,
             **supervisor_kwargs,
         }
-        self.memory = MemorySaver()
+        self.memory = get_checkpointer()
         self.app = None
+        self.supervisor_agent = None
 
     async def _load_supervisor_mcp_tools(self) -> list[dict[str, Any]]:
         return await load_mcp_tools(self.supervisor_tools)
+
+    def _build_agent_tools(self) -> list[BaseTool]:
+        tools: list[BaseTool] = []
+        for agent in self.agents:
+            agent_name = getattr(agent, "name", None) or f"agent_{len(tools) + 1}"
+            safe_tool_name = (
+                agent_name.lower().replace(" ", "_").replace("-", "_")
+            )
+            input_model = create_model(
+                f"{safe_tool_name}_Input",
+                query=(str, Field(description=f"Question or task for {agent_name}")),
+            )
+
+            async def call_agent(
+                query: str,
+                config: RunnableConfig | None = None,
+                *,
+                _agent=agent,
+                _agent_name=agent_name,
+            ) -> str:
+                parent_thread_id = None
+                if config:
+                    parent_thread_id = (
+                        config.get("configurable", {}) or {}
+                    ).get("thread_id")
+                child_thread_id = (
+                    f"{parent_thread_id}:{_agent_name}"
+                    if parent_thread_id
+                    else f"{_agent_name}:{uuid.uuid4().hex}"
+                )
+                response = await _agent.ainvoke(
+                    {"messages": [{"role": "user", "content": query}]},
+                    config={"configurable": {"thread_id": child_thread_id}},
+                )
+                if isinstance(response, dict) and response.get("messages"):
+                    last_message = response["messages"][-1]
+                    if hasattr(last_message, "content"):
+                        return str(last_message.content)
+                    if isinstance(last_message, dict):
+                        return str(last_message.get("content", ""))
+                if hasattr(response, "content"):
+                    return str(response.content)
+                return str(response)
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=call_agent,
+                    name=safe_tool_name,
+                    description=(
+                        f"Delegate work to agent '{agent_name}'. "
+                        f"Use this when the task matches that agent's specialization."
+                    ),
+                    args_schema=input_model,
+                )
+            )
+        return tools
+
+    def _build_supervisor_prompt(self, agent_tools: list[BaseTool]) -> str:
+        agent_list = "\n".join(
+            f"- {tool.name}: {tool.description}" for tool in agent_tools
+        )
+        base_prompt = self.prompt.strip()
+        return (
+            f"{base_prompt}\n\n"
+            "Available delegate agents:\n"
+            f"{agent_list}\n\n"
+            "Delegate to the most relevant agent tool when specialized work is needed. "
+            "After any tool call, return a direct final answer to the user."
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -425,19 +511,29 @@ class Supervisor:
     )
     async def _create_supervisor_workflow(self) -> None:
         try:
-            tools = _dicts_to_tools(await self._load_supervisor_mcp_tools())
-            logger.info("Supervisor loaded %d tools", len(tools))
+            external_tools = _dicts_to_tools(await self._load_supervisor_mcp_tools())
+            agent_tools = self._build_agent_tools()
+            all_tools = agent_tools + external_tools
+            logger.info(
+                "Supervisor loaded %d agent tools and %d external tools",
+                len(agent_tools),
+                len(external_tools),
+            )
 
-            workflow = create_supervisor(
-                self.agents,
+            self.supervisor_agent = lc_create_agent(
                 model=self.llm,
-                prompt=self.prompt,
-                tools=tools if tools else None,
-                **self.supervisor_kwargs,
+                tools=all_tools,
+                system_prompt=self._build_supervisor_prompt(agent_tools),
+                checkpointer=self.memory,
+                middleware=(
+                    [HumanInTheLoopMiddleware(interrupt_on=_parse_hitl_tools())]
+                    if _parse_hitl_tools()
+                    else []
+                ),
+                state_schema=RuntimeAgentState,
+                name="global_supervisor",
             )
-            self.app = workflow.compile(
-                checkpointer=self.memory, name="global_supervisor"
-            )
+            self.app = self.supervisor_agent
         except Exception as e:
             logger.error("Supervisor workflow initialization failed: %s", e, exc_info=True)
             raise
@@ -457,7 +553,15 @@ class Supervisor:
             raise RuntimeError(
                 "Supervisor must be initialized. Call init_supervisor() first."
             )
-        config_dict = {"configurable": {"thread_id": thread_id or uuid.uuid4().hex}}
+        config_dict = _build_invoke_config(
+            thread_id=thread_id or uuid.uuid4().hex,
+            run_name="supervisor_invoke",
+            tags=["mao", "supervisor"],
+            metadata={
+                "supervisor_provider": self.supervisor_provider,
+                "supervisor_model_name": self.supervisor_model_name,
+            },
+        )
         return await self.app.ainvoke({"messages": messages}, config=config_dict)
 
 

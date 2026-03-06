@@ -9,11 +9,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.types import Command
 
-from ..agents import Supervisor, create_agent
+from ..agents import Supervisor, _build_invoke_config, create_agent
 from .api import active_agents, get_config_db
 from .db import ConfigDB
-from .helpers import create_and_start_agent
+from .helpers import create_and_start_agent, extract_response_text
 from .models import (
     SupervisorCreate,
     SupervisorResponse,
@@ -34,19 +35,6 @@ router = APIRouter(prefix="/teams", tags=["teams"])
 # Global state for active supervisors and teams
 active_supervisors: dict[str, dict[str, Any]] = {}
 active_teams: dict[str, dict[str, Any]] = {}
-
-
-def _extract_response_text(response: Any) -> tuple[str, str | None]:
-    if isinstance(response, dict) and response.get("messages"):
-        last_message = response["messages"][-1]
-        if hasattr(last_message, "content"):
-            return str(last_message.content), getattr(last_message, "name", None)
-        if isinstance(last_message, dict):
-            return str(last_message.get("content", "")), last_message.get("name")
-    if hasattr(response, "content"):
-        return str(response.content), getattr(response, "name", None)
-    return str(response), None
-
 
 async def _start_team_runtime(
     team_id: str, db: ConfigDB
@@ -545,11 +533,26 @@ async def chat_with_team(
             raise HTTPException(status_code=400, detail="Team supervisor is not running")
 
         thread_id = message.thread_id or f"team_{team_id}_thread_{uuid.uuid4().hex}"
-        response = await supervisor_app.ainvoke(
-            {"messages": [HumanMessage(content=message.content)]},
-            config={"configurable": {"thread_id": thread_id}},
+        config = _build_invoke_config(
+            thread_id=thread_id,
+            run_name="team_chat",
+            tags=["mao", "team", team_id],
+            metadata={"team_id": team_id},
         )
-        response_text, responding_agent_id = _extract_response_text(response)
+        if message.approval_decisions:
+            response = await supervisor_app.ainvoke(
+                Command(resume={"decisions": message.approval_decisions}),
+                config=config,
+            )
+        else:
+            response = await supervisor_app.ainvoke(
+                {
+                    "messages": [HumanMessage(content=message.content)],
+                    "response_schema": message.response_schema,
+                },
+                config=config,
+            )
+        response_text, responding_agent_id = extract_response_text(response)
 
         trace = None
         if isinstance(response, dict) and response.get("messages"):

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import httpx
 import socket
+import subprocess
 import time
 import threading
 import uuid
@@ -26,6 +27,13 @@ except ImportError:
     asyncio_fixture = pytest.fixture  # type: ignore
 
 
+PREFERRED_HITL_CLOUD_MODELS = (
+    "gpt-oss:20b-cloud",
+    "qwen3.5:cloud",
+    "glm-5:cloud",
+)
+
+
 @asyncio_fixture(scope="function")
 async def mcp_client():
     client = None
@@ -36,7 +44,8 @@ async def mcp_client():
         )
         yield client
     finally:
-        pass
+        if client is not None:
+            del client
 
 
 @pytest.fixture(scope="function")
@@ -46,10 +55,14 @@ def api_test_client():
 
     previous_mcp_db_path = os.environ.get("MCP_DB_PATH")
     previous_vector_db_path = os.environ.get("VECTOR_DB_PATH")
+    previous_checkpoint_db_path = os.environ.get("MAO_CHECKPOINT_DB_PATH")
     test_run_id = uuid.uuid4().hex
     os.environ["MCP_DB_PATH"] = os.path.join(base_tmp_dir, f"api_{test_run_id}.duckdb")
     os.environ["VECTOR_DB_PATH"] = os.path.join(
         base_tmp_dir, f"api_vectors_{test_run_id}.duckdb"
+    )
+    os.environ["MAO_CHECKPOINT_DB_PATH"] = os.path.join(
+        base_tmp_dir, f"api_checkpoints_{test_run_id}.duckdb"
     )
     test_api = MCPAgentsAPI(
         db_path=":memory:", title="Test MCP Agents API", version="test"
@@ -59,6 +72,10 @@ def api_test_client():
         yield client, test_api
     finally:
         asyncio.run(ConfigDB.cleanup())
+        if previous_checkpoint_db_path is None:
+            os.environ.pop("MAO_CHECKPOINT_DB_PATH", None)
+        else:
+            os.environ["MAO_CHECKPOINT_DB_PATH"] = previous_checkpoint_db_path
         if previous_mcp_db_path is None:
             os.environ.pop("MCP_DB_PATH", None)
         else:
@@ -67,6 +84,28 @@ def api_test_client():
             os.environ.pop("VECTOR_DB_PATH", None)
         else:
             os.environ["VECTOR_DB_PATH"] = previous_vector_db_path
+
+
+@pytest.fixture(scope="session")
+def real_tool_calling_cloud_model():
+    requested_model = os.environ.get("TEST_HITL_MODEL")
+    available_models = _list_ollama_models()
+
+    if requested_model:
+        if requested_model not in available_models:
+            pytest.skip(
+                f"Requested TEST_HITL_MODEL '{requested_model}' is not available in ollama list"
+            )
+        return requested_model
+
+    for model_name in PREFERRED_HITL_CLOUD_MODELS:
+        if model_name in available_models:
+            return model_name
+
+    pytest.skip(
+        "No verified tool-calling cloud model available. "
+        f"Checked: {', '.join(PREFERRED_HITL_CLOUD_MODELS)}"
+    )
 
 
 def find_free_port():
@@ -136,3 +175,22 @@ def pytest_sessionfinish(session, exitstatus):
             os.remove(test_db_path)
         except Exception as e:
             logging.warning(f"Could not remove test database: {e}")
+
+
+def _list_ollama_models() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"ollama list not available for HITL tests: {exc}")
+
+    models: set[str] = set()
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            models.add(parts[0])
+    return models

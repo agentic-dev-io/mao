@@ -42,8 +42,8 @@ class MCPClient(MultiServerMCPClient):
     """
     Manages MCP server connections and tool enablement states.
 
-    Configuration is loaded from 'mcp.json' located in the project's root directory,
-    or from a specified environment variable MCP_CONFIG_PATH.
+    Configuration is loaded from a specified `config_path`, then `MCP_CONFIG_PATH`,
+    then `.mcp.json`, then `mcp.json` in the project root.
 
     This client uses the 'mcpServers' configuration key and supports:
     - Async operations for all methods
@@ -59,16 +59,7 @@ class MCPClient(MultiServerMCPClient):
     ):
         self.project_root = pathlib.Path(__file__).resolve().parent.parent.parent
 
-        # Use config_path parameter, environment variable, or default path
-        self.config_file_path = (
-            pathlib.Path(config_path)
-            if config_path
-            else (
-                pathlib.Path(os.environ.get("MCP_CONFIG_PATH", ""))
-                if os.environ.get("MCP_CONFIG_PATH")
-                else self.project_root / "mcp.json"
-            )
-        )
+        self.config_file_path = self._resolve_config_file_path(config_path)
 
         self.config = config if config is not None else self._load_config()
         self.tool_states = initial_tool_states or {}
@@ -78,9 +69,28 @@ class MCPClient(MultiServerMCPClient):
         # Track active servers to handle dynamic enabling/disabling
         self._active_servers = set(self.list_servers())
 
+    def _resolve_config_file_path(self, config_path: str | None) -> pathlib.Path:
+        if config_path:
+            return pathlib.Path(config_path)
+
+        env_config_path = os.environ.get("MCP_CONFIG_PATH")
+        if env_config_path:
+            return pathlib.Path(env_config_path)
+
+        preferred_paths = (
+            self.project_root / ".mcp.json",
+            self.project_root / "mcp.json",
+        )
+        for candidate in preferred_paths:
+            if candidate.exists():
+                return candidate
+
+        # Keep the final default deterministic for error messages when neither exists.
+        return self.project_root / ".mcp.json"
+
     def _load_config(self) -> dict:
         """
-        Load MCP config from mcp.json located in the project root (self.config_file_path).
+        Load MCP config from the resolved config path (self.config_file_path).
         Raises FileNotFoundError if the file is not found, or ValueError if JSON is malformed or 'mcpServers' key is missing.
         """
         config_path = self.config_file_path
@@ -196,7 +206,7 @@ class MCPClient(MultiServerMCPClient):
         return self.tool_states.get(tool_name, False)
 
     def reload(self) -> None:
-        """Reloads the configuration from the mcp.json file located in the project root."""
+        """Reloads the configuration from the resolved MCP config path."""
         logging.info(f"Reloading MCP configuration from {self.config_file_path}")
         self.config = self._load_config()
         self.connections = self._build_connections()
@@ -205,7 +215,7 @@ class MCPClient(MultiServerMCPClient):
         self._active_servers = set(self.list_servers())
 
     async def reload_async(self) -> None:
-        """Asynchronously reloads the configuration from the mcp.json file located in the project root."""
+        """Asynchronously reloads the configuration from the resolved MCP config path."""
         self.reload()
         # If there are any async operations needed in the future, they would go here
 

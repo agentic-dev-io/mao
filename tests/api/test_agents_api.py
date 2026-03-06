@@ -2,7 +2,34 @@
 Tests for the Agents API endpoints.
 """
 
+import os
 import uuid
+
+import duckdb
+import httpx
+import pytest
+from langchain.agents import create_agent as lc_create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, ModelRequest
+from langchain.chat_models import init_chat_model
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+
+from mao.api.agents import active_agents
+
+TEST_LLM_PROVIDER = os.environ.get("TEST_LLM_PROVIDER", "ollama")
+TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
+
+
+class ForceToolChoiceMiddleware(AgentMiddleware):
+    async def awrap_model_call(self, request: ModelRequest, handler):
+        return await handler(request.override(tool_choice="dangerous_add"))
+
+
+@tool
+async def dangerous_add(a: int, b: int) -> str:
+    """Add two integers."""
+    return str(a + b)
 
 
 def test_create_agent(api_test_client):
@@ -15,9 +42,6 @@ def test_create_agent(api_test_client):
         "provider": "anthropic",
         "model_name": "claude-3-sonnet-20240229",
         "system_prompt": "You are a helpful AI assistant.",
-        "use_react_agent": True,
-        "max_tokens_trimmed": 4000,
-        "llm_specific_kwargs": {"temperature": 0.5},
     }
 
     response = client.post("/agents", json=agent_data)
@@ -28,9 +52,9 @@ def test_create_agent(api_test_client):
     assert data["provider"] == agent_data["provider"]
     assert data["model_name"] == agent_data["model_name"]
     assert data["system_prompt"] == agent_data["system_prompt"]
-    assert data["use_react_agent"] == agent_data["use_react_agent"]
-    assert data["max_tokens_trimmed"] == agent_data["max_tokens_trimmed"]
-    assert data["llm_specific_kwargs"] == agent_data["llm_specific_kwargs"]
+    assert "use_react_agent" not in data
+    assert "max_tokens_trimmed" not in data
+    assert "llm_specific_kwargs" not in data
     assert "id" in data
     assert data["id"].startswith("agent_")
 
@@ -184,6 +208,166 @@ def test_list_running_agents(api_test_client):
     assert "count" in data
     assert "agents" in data
     assert isinstance(data["agents"], list)
+
+
+def test_agents_schema_does_not_expose_legacy_columns(api_test_client):
+    """Test the persisted agents schema matches the simplified API."""
+    client, _ = api_test_client
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Schema Agent",
+            "provider": "anthropic",
+            "model_name": "claude-3-haiku-20240307",
+        },
+    )
+    assert create_response.status_code == 201
+
+    conn = duckdb.connect(os.environ["MCP_DB_PATH"])
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('agents')").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert "use_react_agent" not in columns
+    assert "max_tokens_trimmed" not in columns
+    assert "llm_specific_kwargs" not in columns
+
+
+def test_start_agent_runtime(api_test_client):
+    """Test starting an agent through the real runtime path."""
+    client, _ = api_test_client
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Runtime Agent",
+            "provider": TEST_LLM_PROVIDER,
+            "model_name": TEST_LLM_MODEL,
+            "system_prompt": "You answer briefly.",
+        },
+    )
+    assert create_response.status_code == 201
+    agent_id = create_response.json()["id"]
+
+    start_response = client.post(f"/agents/{agent_id}/start")
+    assert start_response.status_code == 200
+    assert start_response.json()["status"] == "started"
+
+    running_response = client.get("/agents/running")
+    assert running_response.status_code == 200
+    assert running_response.json()["count"] >= 1
+
+
+def test_chat_with_agent_runtime(api_test_client):
+    """Test chatting with a running agent through the real runtime path."""
+    client, _ = api_test_client
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Chat Runtime Agent",
+            "provider": TEST_LLM_PROVIDER,
+            "model_name": TEST_LLM_MODEL,
+            "system_prompt": "Answer with a short factual reply.",
+        },
+    )
+    assert create_response.status_code == 201
+    agent_id = create_response.json()["id"]
+
+    start_response = client.post(f"/agents/{agent_id}/start")
+    assert start_response.status_code == 200
+
+    chat_response = client.post(
+        f"/agents/{agent_id}/chat",
+        json={"content": "What is 2 + 2?", "thread_id": f"agent_runtime_{uuid.uuid4().hex}"},
+    )
+    assert chat_response.status_code == 200
+    payload = chat_response.json()
+    assert payload["response"]
+    assert payload["thread_id"]
+    assert "details" in payload
+
+
+@pytest.mark.asyncio
+async def test_chat_with_agent_hitl_resume_real_cloud(
+    api_test_client, real_tool_calling_cloud_model
+):
+    """Test HITL interrupt and resume with a real cloud model."""
+    _, test_api = api_test_client
+    agent_id = f"agent_hitl_{uuid.uuid4().hex[:8]}"
+    thread_id = f"agent_hitl_thread_{uuid.uuid4().hex}"
+    transport = httpx.ASGITransport(app=test_api)
+
+    model = init_chat_model(
+        real_tool_calling_cloud_model,
+        model_provider="ollama",
+        temperature=0,
+    )
+    agent_app = lc_create_agent(
+        model=model,
+        tools=[dangerous_add],
+        system_prompt="Use the dangerous_add tool for addition requests.",
+        middleware=[
+            ForceToolChoiceMiddleware(),
+            HumanInTheLoopMiddleware(
+                interrupt_on={
+                    "dangerous_add": {
+                        "allowed_decisions": ["approve", "edit", "reject"]
+                    }
+                }
+            ),
+        ],
+        checkpointer=InMemorySaver(),
+        name="hitl_runtime_test",
+    )
+    active_agents[agent_id] = {
+        "agent": agent_app,
+        "config": {
+            "name": "hitl_runtime_test",
+            "provider": "ollama",
+            "model_name": real_tool_calling_cloud_model,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            first_response = await client.post(
+                f"/agents/{agent_id}/chat",
+                json={
+                    "content": "Call dangerous_add with a=2 and b=3.",
+                    "thread_id": thread_id,
+                },
+            )
+            assert first_response.status_code == 200
+            first_payload = first_response.json()
+            assert first_payload["response"] == "Approval required."
+            assert first_payload["thread_id"] == thread_id
+            assert first_payload["details"]["__interrupt__"]
+            tool_calls = first_payload["details"]["messages"][-1]["tool_calls"]
+            assert tool_calls[0]["name"] == "dangerous_add"
+            assert tool_calls[0]["args"] == {"a": 2, "b": 3}
+
+            second_response = await client.post(
+                f"/agents/{agent_id}/chat",
+                json={
+                    "content": "resume",
+                    "thread_id": thread_id,
+                    "approval_decisions": [{"type": "approve"}],
+                },
+            )
+            assert second_response.status_code == 200
+            second_payload = second_response.json()
+            assert second_payload["thread_id"] == thread_id
+            assert "5" in second_payload["response"]
+            assert "__interrupt__" not in second_payload["details"]
+    finally:
+        active_agents.pop(agent_id, None)
 
 
 def test_delete_agent_with_dependencies(api_test_client):

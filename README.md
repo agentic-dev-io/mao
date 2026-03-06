@@ -66,12 +66,23 @@ ANTHROPIC_API_KEY=sk-...
 # Vector Storage (optional — defaults to mao_vectors.duckdb)
 VECTOR_DB_PATH=./data/mao_vectors.duckdb
 
+# LangGraph checkpoints (durable short-term memory)
+MAO_CHECKPOINT_DB_PATH=./data/mao_checkpoints.duckdb
+
 # DuckDB Configuration
 MCP_DB_PATH=./data/mcp_config.duckdb
 
 # MCP / Ollama
-MCP_CONFIG_PATH=./mcp.json
+MCP_CONFIG_PATH=./.mcp.json
 OLLAMA_HOST=http://localhost:11434
+
+# HITL for selected tool names (comma-separated)
+MAO_HITL_TOOLS=send_email,delete_record
+
+# LangSmith tracing
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_PROJECT=mao-agents
+LANGCHAIN_TRACING_V2=true
 ```
 
 ## API
@@ -82,6 +93,13 @@ uv run uvicorn src.mao.api.api:api --host 0.0.0.0 --port 8000 --reload
 
 Endpoints: `/agents`, `/teams`, `/mcp`, `/config`, `/health`
 Docs: `/docs` (Swagger), `/redoc`
+
+Runtime notes:
+- Agent and supervisor checkpoint state is persisted via `MAO_CHECKPOINT_DB_PATH`
+- `/agents/{id}/chat` and `/teams/{id}/chat` accept optional `response_schema`
+  for structured output
+- The same chat endpoints accept optional `approval_decisions` to resume
+  human-in-the-loop tool approvals
 
 ## Docker
 

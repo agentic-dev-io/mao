@@ -281,10 +281,10 @@ async def export_mcp_config(
     db: ConfigDB = Depends(get_config_db),
 ):
     """
-    Exports all server configurations to a mcp.json file format compatible with MCPClient.
+    Exports all server configurations to a .mcp.json-compatible file.
 
     Args:
-        filepath: Optional path where to save the file (default: project root / mcp.json)
+        filepath: Optional path where to save the file (default: project root / .mcp.json)
         enabled_only: Only include enabled servers in the export
 
     Returns:
@@ -293,9 +293,9 @@ async def export_mcp_config(
     # Get project root (3 levels up from current file)
     project_root = Path(__file__).resolve().parent.parent.parent.parent
 
-    # Default filepath is mcp.json in project root
+    # Default filepath is .mcp.json in project root
     if not filepath:
-        filepath = project_root / "mcp.json"
+        filepath = project_root / ".mcp.json"
     else:
         filepath = Path(filepath)
 
@@ -334,7 +334,7 @@ async def get_mcp_config_file(db: ConfigDB = Depends(get_config_db)):
 
     return FileResponse(
         path=temp_file,
-        filename="mcp.json",
+        filename=".mcp.json",
         media_type="application/json",
         background=BackgroundTask(cleanup),
     )
