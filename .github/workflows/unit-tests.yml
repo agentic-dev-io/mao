@@ -13,8 +13,6 @@ jobs:
     timeout-minutes: 15
 
     env:
-      # Unit tests use FastEmbedEmbeddings (local, no API key needed)
-      QDRANT_URL: http://localhost:6333
       MCP_DB_PATH: ./data/mcp_config.duckdb
       MCP_CONFIG_PATH: ./mcp.json
       PYTHONUNBUFFERED: 1
@@ -27,8 +25,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Set up Node.js (for MCP server config)
-        uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -37,37 +35,16 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Create data directory
-        run: mkdir -p data
-
       - name: Install dependencies
         run: |
+          mkdir -p data
           uv sync
-          uv pip install pytest pytest-asyncio pytest-cov pytest-timeout pytest-xdist
+          echo '{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]}}}' > ./mcp.json
 
-      - name: Setup MCP configuration for tests
-        run: |
-          echo '{
-            "mcpServers": {
-              "memory": {
-                "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-memory"]
-              }
-            }
-          }' > ./mcp.json
+      - name: Run tests
+        run: uv run pytest --cov=src --timeout=60 -v
 
-      - name: Run unit tests (without Docker services)
-        run: |
-          # Run only API tests that don't require external services
-          # These tests use TestClient and mocks
-          uv run pytest --cov=src --timeout=60 -v \
-            tests/api/test_api.py \
-            tests/api/test_agents_api.py \
-            tests/api/test_mcp_api.py \
-            tests/api/test_teams_api.py \
-            || true
-
-      - name: Upload coverage to Codecov
+      - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

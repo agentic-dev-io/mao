@@ -1,9 +1,7 @@
 name: Lint and Unit Tests
 
-# This workflow runs code quality checks (linting) and fast unit tests.
-# For full integration tests with Docker services (Qdrant, Ollama), see:
-# - integration-tests.yml: Runs on main branch or when PR is labeled 'test-integration'
-# - unit-tests.yml: Fast tests without external services, runs on all PRs
+# Code quality checks (linting, formatting, type checking).
+# For integration tests with Docker services, see integration-tests.yml.
 
 on:
   push:

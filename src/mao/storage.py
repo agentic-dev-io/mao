@@ -1,46 +1,26 @@
 """
-KnowledgeTree and ExperienceTree: Qdrant-based vector stores for agent knowledge and experience.
+KnowledgeTree and ExperienceTree: DuckDB-based vector stores for agent knowledge and experience.
 """
 
 import asyncio
+import json
 import logging
 import os
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, TypedDict
 
-# Type definitions
-from typing_extensions import NotRequired  # Python 3.12+ standard
+from typing_extensions import NotRequired
 
-# Modern Qdrant client with async API
+import duckdb
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.embeddings import Embeddings
-from qdrant_client import QdrantClient, models
-from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.http.exceptions import (
-    ApiException,
-    ResponseHandlingException,
-    UnexpectedResponse,
-)
-from qdrant_client.http.models import Distance, PointStruct, VectorParams
-from tenacity import (
-    RetryError,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-# Environment variables with typing
-EMBED_MODEL: str = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
-QDRANT_URL: str = os.environ.get("QDRANT_URL", "http://localhost:6333")
-VECTOR_NAME: str = "default"
-BATCH_SIZE: int = int(os.environ.get("QDRANT_BATCH_SIZE", "32"))
+VECTOR_DB_PATH: str = os.environ.get("VECTOR_DB_PATH", "mao_vectors.duckdb")
+BATCH_SIZE: int = int(os.environ.get("VECTOR_BATCH_SIZE", "32"))
 
 
-# Typed dictionary for search results
 class SearchResult(TypedDict):
     id: str
     score: float
@@ -49,54 +29,32 @@ class SearchResult(TypedDict):
     relations: NotRequired[list[dict[str, Any]]]
 
 
-# --- Embedding Model Factory ---
 class EmbeddingProvider:
-    """Factory for embedding models with proper dimension handling"""
-
     @staticmethod
     async def create_embeddings() -> tuple[Embeddings, int]:
-        """Create embedding model and return it with its dimension"""
-
-        try:
-            fast_embed: Embeddings = FastEmbedEmbeddings(
-                model_name="BAAI/bge-small-en-v1.5", parallel=0
-            )
-            # Try to get dimension from model properties
-            if hasattr(fast_embed, "embedding_size") and fast_embed.embedding_size:
-                embed_dim = int(fast_embed.embedding_size)
-            elif hasattr(fast_embed, "dim") and fast_embed.dim:
-                embed_dim = int(fast_embed.dim)
-            else:
-                # Infer from a test embedding
-                embed_dim = len(fast_embed.embed_query("test"))
-            logging.info(
-                f"Using FastEmbed embeddings: BAAI/bge-small-en-v1.5 with dimensions {embed_dim}"
-            )
-            return fast_embed, embed_dim
-        except Exception as e:
-            logging.error(f"Failed to initialize any embedding model: {e}")
-            raise RuntimeError(f"Could not initialize any embedding model: {e}")
+        fast_embed: Embeddings = FastEmbedEmbeddings(
+            model_name="BAAI/bge-small-en-v1.5", parallel=0
+        )
+        if hasattr(fast_embed, "embedding_size") and fast_embed.embedding_size:
+            embed_dim = int(fast_embed.embedding_size)
+        elif hasattr(fast_embed, "dim") and fast_embed.dim:
+            embed_dim = int(fast_embed.dim)
+        else:
+            embed_dim = len(fast_embed.embed_query("test"))
+        logging.info(
+            f"Using FastEmbed: BAAI/bge-small-en-v1.5 with dim {embed_dim}"
+        )
+        return fast_embed, embed_dim
 
 
-class QdrantOperationError(Exception):
-    """Custom exception for Qdrant operations that fail after retries."""
-
+class VectorStoreError(Exception):
     pass
 
 
-# Improved retry configuration
-DEFAULT_RETRY_STOP = stop_after_attempt(3)
-DEFAULT_RETRY_WAIT = wait_exponential(multiplier=1, min=2, max=10)
-# Nur tatsächlich vorhandene Exception-Typen
-QDRANT_RETRY_EXCEPTION = (UnexpectedResponse, ApiException, ResponseHandlingException)
-
-
 class VectorStoreBase:
-    """Base class with common vector store functionality and async methods"""
-
     def __init__(
         self,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "default_collection",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
@@ -104,17 +62,10 @@ class VectorStoreBase:
         ) = None,
     ):
         self.collection_name = collection_name
-        self.qdrant_url = url
-        self.vector_name = VECTOR_NAME
+        self.db_path = db_path
         self.recreate_on_dim_mismatch = recreate_on_dim_mismatch
+        self.conn = duckdb.connect(db_path)
 
-        # Synchronous client for backward compatibility
-        self.client = QdrantClient(url=self.qdrant_url)
-
-        # Async client for modern async ops
-        self.async_client = AsyncQdrantClient(url=self.qdrant_url)
-
-        # Initialize embeddings (will be set in async_init)
         self.embed: Embeddings | None = None
         self.embed_dim: int | None = None
         self._embedding_provider = (
@@ -122,343 +73,160 @@ class VectorStoreBase:
         )
 
     async def async_init(self) -> "VectorStoreBase":
-        """Async initialization method"""
         self.embed, self.embed_dim = await self._embedding_provider()
-        # Ensure collection exists
-        await self._ensure_collection()
+        self._ensure_collection()
         logging.info(
-            f"{self.__class__.__name__}: Using embedding dim {self.embed_dim} "
-            f"for collection '{self.collection_name}' at {self.qdrant_url}"
+            f"{self.__class__.__name__}: dim {self.embed_dim} "
+            f"for '{self.collection_name}' at {self.db_path}"
         )
         return self
 
     @classmethod
     async def create(
         cls,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "default_collection",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
             Callable[[], Awaitable[tuple[Embeddings, int]]] | None
         ) = None,
     ) -> "VectorStoreBase":
-        """Factory method for async initialization"""
         instance = cls(
-            url, collection_name, recreate_on_dim_mismatch, embedding_provider
+            db_path, collection_name, recreate_on_dim_mismatch, embedding_provider
         )
         return await instance.async_init()
 
-    async def _ensure_collection(self) -> None:
-        """Ensure collection exists with correct vector dimension"""
+    def _ensure_collection(self) -> None:
+        table = self.collection_name
         try:
-            collections = await self.async_client.get_collections()
-            collection_names = [c.name for c in collections.collections]
-            exists = self.collection_name in collection_names
+            existing = self.conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name = ?",
+                [table],
+            ).fetchone()
 
-            if exists:
-                info = await self.async_client.get_collection(self.collection_name)
-                vectors_cfg = info.config.params.vectors
-                col_dim = None
-
-                if isinstance(vectors_cfg, dict) and self.vector_name in vectors_cfg:
-                    v = vectors_cfg[self.vector_name]
-                    if isinstance(v, VectorParams):
-                        col_dim = v.size
-                    else:
-                        col_dim = None
-                elif hasattr(vectors_cfg, "size"):
-                    s = getattr(vectors_cfg, "size", None)
-                    if isinstance(s, int):
-                        col_dim = s
-                    else:
-                        col_dim = None
-
-                if col_dim is None:
+            if existing and self.recreate_on_dim_mismatch and self.embed_dim:
+                col_info = self.conn.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = ? AND column_name = 'embedding'",
+                    [table],
+                ).fetchone()
+                if col_info and f"[{self.embed_dim}]" not in str(col_info[0]):
                     logging.warning(
-                        f"Could not determine vector dimension for existing collection "
-                        f"'{self.collection_name}'. Assuming compatible."
+                        f"Dimension mismatch for '{table}'. Recreating."
                     )
-                elif col_dim != self.embed_dim:
-                    msg = f"Collection '{self.collection_name}' has dimension {col_dim}, but model expects {self.embed_dim}."
-                    if self.recreate_on_dim_mismatch:
-                        logging.warning(
-                            f"{msg} RECREATING collection based on recreate_on_dim_mismatch=True."
-                        )
-                        await self.async_client.recreate_collection(
-                            collection_name=self.collection_name,
-                            vectors_config={
-                                self.vector_name: VectorParams(
-                                    size=(
-                                        self.embed_dim
-                                        if self.embed_dim is not None
-                                        else 1536
-                                    ),
-                                    distance=Distance.COSINE,
-                                )
-                            },
-                        )
-                    else:
-                        logging.error(
-                            f"{msg} NOT recreating automatically. Manual intervention may be required."
-                        )
-            else:
-                logging.info(
-                    f"Collection '{self.collection_name}' does not exist. Creating now with dim {self.embed_dim}."
-                )
-                await self.async_client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config={
-                        self.vector_name: VectorParams(
-                            size=self.embed_dim if self.embed_dim is not None else 1536,
-                            distance=Distance.COSINE,
-                        )
-                    },
-                )
-            logging.info(
-                f"Collection '{self.collection_name}' is ready with target dim {self.embed_dim}."
-            )
+                    self.conn.execute(f"DROP TABLE {table}")
+                    existing = None
+
+            if not existing:
+                self.conn.execute(f"""
+                    CREATE TABLE {table} (
+                        id VARCHAR PRIMARY KEY,
+                        text VARCHAR,
+                        tags JSON,
+                        relations JSON,
+                        embedding FLOAT[{self.embed_dim}]
+                    )
+                """)
         except Exception as e:
-            logging.error(
-                f"Error during collection setup for '{self.collection_name}': {e}"
-            )
-            raise QdrantOperationError(
-                f"Failed to ensure collection '{self.collection_name}': {e}"
+            raise VectorStoreError(
+                f"Failed to ensure collection '{table}': {e}"
             ) from e
 
-    async def wait_for_index(
-        self, timeout: float = 2.0, check_interval: float = 0.1
-    ) -> bool:
-        """
-        Wait for Qdrant index to be fully updated.
+    def _parse_json(self, val: Any) -> Any:
+        if isinstance(val, str):
+            return json.loads(val)
+        return val if val is not None else []
 
-        Args:
-            timeout: Maximum wait time in seconds
-            check_interval: Check interval in seconds
-
-        Returns:
-            bool: True if index is updated, False otherwise
-        """
-        try:
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                # Check collection status
-                collection_info = await self.async_client.get_collection(
-                    self.collection_name
-                )
-                if (
-                    hasattr(collection_info, "status")
-                    and collection_info.status == "green"
-                ):
-                    return True
-                await asyncio.sleep(check_interval)
-            return False
-        except Exception as e:
-            logging.warning(f"Error checking index status: {e}")
-            return False
-
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def add_entry_async(self, text: str, tags: list[str] | None = None) -> str:
-        """
-        Add entry to vector store asynchronously.
-        """
         if self.embed is None or self.embed_dim is None:
             raise RuntimeError("Embeddings not initialized. Call async_init() first.")
         point_id = str(uuid.uuid4())
+        vector = self.embed.embed_query(text)
         try:
-            # Embed query (still sync due to model limitations)
-            vector = self.embed.embed_query(text)
-            if len(vector) != self.embed_dim:
-                logging.error(
-                    f"CRITICAL: Embedding vector for entry '{point_id}' has dim {len(vector)}, "
-                    f"but collection expects {self.embed_dim}!"
-                )
-            payload = {"text": text, "tags": tags or []}
-            # Async upsert
-            await self.async_client.upsert(
-                collection_name=self.collection_name,
-                points=[
-                    PointStruct(
-                        id=point_id, vector={self.vector_name: vector}, payload=payload
-                    )
-                ],
-                wait=True,
+            self.conn.execute(
+                f"INSERT INTO {self.collection_name} VALUES (?, ?, ?, ?, ?)",
+                [point_id, text, json.dumps(tags or []), json.dumps([]), vector],
             )
-            # Small delay to ensure index is updated
-            await asyncio.sleep(0.1)
-            logging.info(f"Added entry {point_id} to {self.collection_name}.")
             return point_id
-        except RetryError as e:
-            logging.error(
-                f"Failed to add entry to '{self.collection_name}' after retries: {e}"
-            )
-            raise QdrantOperationError(f"Failed to add entry after retries: {e}") from e
         except Exception as e:
-            logging.error(f"Failed to add entry to '{self.collection_name}': {e}")
-            raise QdrantOperationError(f"Failed to add entry: {e}") from e
+            raise VectorStoreError(f"Failed to add entry: {e}") from e
 
-    # Synchronous wrapper for backward compatibility
     def add_entry(self, text: str, tags: list[str] | None = None) -> str:
-        """Synchronous wrapper for add_entry_async"""
         return asyncio.run(self.add_entry_async(text, tags))
 
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def search_async(self, query: str, k: int = 3) -> list[SearchResult]:
-        """
-        Search for similar vectors asynchronously.
-        """
-        await self.wait_for_index(timeout=1.0)
         if self.embed is None:
             raise RuntimeError("Embeddings not initialized. Call async_init() first.")
         try:
             vector = self.embed.embed_query(query)
-            results: Any = []
-            try:
-                results = await self.async_client.query_points(
-                    collection_name=self.collection_name,
-                    query_vector=(self.vector_name, vector),
-                    limit=k,
-                    with_payload=True,
+            rows = self.conn.execute(
+                f"""
+                SELECT id, text, tags, relations,
+                       array_cosine_similarity(embedding, ?::FLOAT[{self.embed_dim}]) as score
+                FROM {self.collection_name}
+                ORDER BY score DESC
+                LIMIT ?
+                """,
+                [vector, k],
+            ).fetchall()
+
+            return [
+                SearchResult(
+                    id=row[0],
+                    score=row[4] if row[4] is not None else 0.0,
+                    page_content=row[1] or "",
+                    tags=self._parse_json(row[2]),
+                    relations=self._parse_json(row[3]),
                 )
-            except Exception as e1:
-                try:
-                    results = await self.async_client.query_points(
-                        collection_name=self.collection_name,
-                        query_vector={self.vector_name: vector},
-                        limit=k,
-                        with_payload=True,
-                    )
-                except Exception as e2:
-                    try:
-                        scroll_results = await self.async_client.scroll(
-                            collection_name=self.collection_name,
-                            limit=k,
-                            with_payload=True,
-                        )
-                        if (
-                            isinstance(scroll_results, tuple)
-                            and len(scroll_results) > 0
-                        ):
-                            scroll_results_list: list[Any] = list(scroll_results[0])
-                            results = scroll_results_list
-                        elif hasattr(scroll_results, "points"):
-                            results = list(getattr(scroll_results, "points", []))
-                        else:
-                            results = []
-                    except Exception as e3:
-                        logging.error(f"All search attempts failed: {e1}, {e2}, {e3}")
-                        return []
-            formatted_hits: list[SearchResult] = []
-            for r in results:
-                try:
-                    payload = getattr(r, "payload", {}) or {}
-                    formatted_hit: SearchResult = {
-                        "id": str(getattr(r, "id", "")),
-                        "score": getattr(r, "score", 1.0),
-                        "page_content": payload.get("text", ""),
-                        "tags": payload.get("tags", []),
-                        "relations": payload.get("relations", []),
-                    }
-                    formatted_hits.append(formatted_hit)
-                except Exception as e:
-                    logging.warning(f"Skipping malformed search result: {e}")
-            return formatted_hits
+                for row in rows
+            ]
         except Exception as e:
             logging.error(f"Search failed in '{self.collection_name}': {e}")
             return []
 
-    # Synchronous wrapper for backward compatibility
     def search(self, query: str, k: int = 3) -> list[SearchResult]:
-        """Synchronous wrapper for search_async"""
         return asyncio.run(self.search_async(query, k))
 
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def delete_entry_async(self, point_id: str) -> bool:
-        """Delete entry asynchronously"""
         try:
-            result = await self.async_client.delete(
-                collection_name=self.collection_name, points_selector=[point_id]
+            self.conn.execute(
+                f"DELETE FROM {self.collection_name} WHERE id = ?", [point_id]
             )
-            status = getattr(result, "status", None)
-            success = status == "completed" if status else True
-            if success:
-                logging.info(f"Deleted entry {point_id} from {self.collection_name}")
-            return success
+            return True
         except Exception as e:
             logging.error(f"Failed to delete entry {point_id}: {e}")
             return False
 
-    # Synchronous wrapper
     def delete_entry(self, point_id: str) -> bool:
-        """Synchronous wrapper for delete_entry_async"""
         return asyncio.run(self.delete_entry_async(point_id))
 
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def get_entry_async(self, point_id: str) -> dict[str, Any] | None:
-        """Get entry by ID asynchronously"""
         try:
-            res_list = await self.async_client.retrieve(
-                collection_name=self.collection_name, ids=[point_id], with_payload=True
-            )
-            if not res_list:
+            row = self.conn.execute(
+                f"SELECT id, text, tags, relations FROM {self.collection_name} WHERE id = ?",
+                [point_id],
+            ).fetchone()
+            if not row:
                 return None
-
-            point_data = res_list[0]
-            payload = point_data.payload if hasattr(point_data, "payload") else {}
-            if payload is None:
-                payload = {}
-
-            entry = {
-                "id": point_data.id,
-                "page_content": payload.get("text", ""),
-                **payload,
+            return {
+                "id": row[0],
+                "page_content": row[1] or "",
+                "text": row[1] or "",
+                "tags": self._parse_json(row[2]),
+                "relations": self._parse_json(row[3]),
             }
-            return entry
         except Exception as e:
-            if "not found" in str(e).lower():
-                return None
             logging.error(f"Error retrieving entry {point_id}: {e}")
             return None
 
-    # Synchronous wrapper
     def get_entry(self, point_id: str) -> dict[str, Any] | None:
-        """Synchronous wrapper for get_entry_async"""
         return asyncio.run(self.get_entry_async(point_id))
 
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def clear_all_points_async(self) -> None:
-        """Clear all points from collection asynchronously"""
-        try:
-            await self.async_client.delete(
-                collection_name=self.collection_name,
-                points_selector=models.Filter(must=[]),
-            )
-        except Exception as e:
-            logging.error(f"Failed to clear all points: {e}")
-            raise
+        self.conn.execute(f"DELETE FROM {self.collection_name}")
 
-    # Synchronous wrapper
     def clear_all_points(self) -> bool:
-        """Synchronous wrapper for clear_all_points_async"""
         try:
             asyncio.run(self.clear_all_points_async())
             return True
@@ -466,277 +234,204 @@ class VectorStoreBase:
             return False
 
     async def add_tag_async(self, point_id: str, tag: str) -> bool:
-        """Add tag to entry asynchronously"""
         entry = await self.get_entry_async(point_id)
         if not entry:
-            logging.warning(f"Cannot add tag to non-existent entry {point_id}")
             return False
-
         tags = set(entry.get("tags", []))
         tags.add(tag)
-
         try:
-            await self.async_client.set_payload(
-                collection_name=self.collection_name,
-                payload={"tags": list(tags)},
-                points=[point_id],
+            self.conn.execute(
+                f"UPDATE {self.collection_name} SET tags = ? WHERE id = ?",
+                [json.dumps(list(tags)), point_id],
             )
             return True
         except Exception as e:
             logging.error(f"Failed to add tag to {point_id}: {e}")
             return False
 
-    # Synchronous wrapper
     def add_tag(self, point_id: str, tag: str) -> bool:
-        """Synchronous wrapper for add_tag_async"""
         return asyncio.run(self.add_tag_async(point_id, tag))
 
     async def get_tags_async(self, point_id: str) -> list[str]:
-        """Get tags for entry asynchronously"""
         entry = await self.get_entry_async(point_id)
         return entry.get("tags", []) if entry else []
 
-    # Synchronous wrapper
     def get_tags(self, point_id: str) -> list[str]:
-        """Synchronous wrapper for get_tags_async"""
         return asyncio.run(self.get_tags_async(point_id))
 
     async def add_relation_async(
         self, from_id: str, to_id: str, rel_type: str = "related"
     ) -> bool:
-        """Add relation between entries asynchronously"""
         entry = await self.get_entry_async(from_id)
         if not entry:
-            logging.warning(f"Cannot add relation from non-existent entry {from_id}")
             return False
-
         rels = entry.get("relations", [])
         if not any(r.get("id") == to_id and r.get("type") == rel_type for r in rels):
             rels.append({"id": to_id, "type": rel_type})
-
             try:
-                await self.async_client.set_payload(
-                    collection_name=self.collection_name,
-                    payload={"relations": rels},
-                    points=[from_id],
+                self.conn.execute(
+                    f"UPDATE {self.collection_name} SET relations = ? WHERE id = ?",
+                    [json.dumps(rels), from_id],
                 )
                 return True
             except Exception as e:
-                logging.error(f"Failed to add relation from {from_id} to {to_id}: {e}")
+                logging.error(f"Failed to add relation {from_id} -> {to_id}: {e}")
                 return False
-        return True  # Relation already exists
+        return True
 
-    # Synchronous wrapper
     def add_relation(self, from_id: str, to_id: str, rel_type: str = "related") -> bool:
-        """Synchronous wrapper for add_relation_async"""
         return asyncio.run(self.add_relation_async(from_id, to_id, rel_type))
 
     async def get_relations_async(
         self, point_id: str, rel_type: str | None = None
     ) -> list[dict[str, Any]]:
-        """Get relations for entry asynchronously"""
         entry = await self.get_entry_async(point_id)
         if not entry:
             return []
-
         rels = entry.get("relations", [])
         if rel_type:
             return [r for r in rels if r.get("type") == rel_type]
         return rels
 
-    # Synchronous wrapper
     def get_relations(
         self, point_id: str, rel_type: str | None = None
     ) -> list[dict[str, Any]]:
-        """Synchronous wrapper for get_relations_async"""
         return asyncio.run(self.get_relations_async(point_id, rel_type))
 
     async def remove_relation_async(
         self, from_id: str, to_id: str, rel_type: str | None = None
     ) -> bool:
-        """Remove relation between entries asynchronously"""
         entry = await self.get_entry_async(from_id)
         if not entry:
             return False
-
         rels = entry.get("relations", [])
         new_rels = [
             r
             for r in rels
             if not (
-                r.get("id") == to_id and (rel_type is None or r.get("type") == rel_type)
+                r.get("id") == to_id
+                and (rel_type is None or r.get("type") == rel_type)
             )
         ]
-
         if len(new_rels) < len(rels):
             try:
-                await self.async_client.set_payload(
-                    collection_name=self.collection_name,
-                    payload={"relations": new_rels},
-                    points=[from_id],
+                self.conn.execute(
+                    f"UPDATE {self.collection_name} SET relations = ? WHERE id = ?",
+                    [json.dumps(new_rels), from_id],
                 )
                 return True
             except Exception as e:
-                logging.error(
-                    f"Failed to remove relation from {from_id} to {to_id}: {e}"
-                )
+                logging.error(f"Failed to remove relation {from_id} -> {to_id}: {e}")
                 return False
-        return True  # No matching relation to remove
+        return True
 
-    # Synchronous wrapper
     def remove_relation(
         self, from_id: str, to_id: str, rel_type: str | None = None
     ) -> bool:
-        """Synchronous wrapper for remove_relation_async"""
         return asyncio.run(self.remove_relation_async(from_id, to_id, rel_type))
 
-    # Additional helper methods
-    @retry(
-        stop=DEFAULT_RETRY_STOP,
-        wait=DEFAULT_RETRY_WAIT,
-        retry=retry_if_exception_type(QDRANT_RETRY_EXCEPTION),
-    )
     async def add_entries_batch_async(
         self, texts: list[str], tags_list: list[list[str]] | None = None
     ) -> list[str]:
-        """Add multiple entries in batch asynchronously"""
         if not texts:
             return []
         if tags_list and len(texts) != len(tags_list):
             raise ValueError(
-                f"Number of texts ({len(texts)}) must match number of tag lists ({len(tags_list)})"
+                f"texts ({len(texts)}) and tags_list ({len(tags_list)}) must have same length"
             )
-        point_ids = [str(uuid.uuid4()) for _ in range(len(texts))]
         if self.embed is None:
             raise RuntimeError("Embeddings not initialized. Call async_init() first.")
+
+        point_ids = [str(uuid.uuid4()) for _ in range(len(texts))]
         try:
             vectors = list(self.embed.embed_documents(texts))
-            points = []
-            for i, (text, vector) in enumerate(zip(texts, vectors)):
-                tags = tags_list[i] if tags_list and i < len(tags_list) else []
-                payload = {"text": text, "tags": tags}
-                points.append(
-                    PointStruct(
-                        id=point_ids[i],
-                        vector={self.vector_name: vector},
-                        payload=payload,
+            for i in range(0, len(texts), BATCH_SIZE):
+                for j in range(i, min(i + BATCH_SIZE, len(texts))):
+                    tags = tags_list[j] if tags_list else []
+                    self.conn.execute(
+                        f"INSERT INTO {self.collection_name} VALUES (?, ?, ?, ?, ?)",
+                        [point_ids[j], texts[j], json.dumps(tags), json.dumps([]), vectors[j]],
                     )
-                )
-            for i in range(0, len(points), BATCH_SIZE):
-                batch = points[i : i + BATCH_SIZE]
-                await self.async_client.upsert(
-                    collection_name=self.collection_name, points=batch, wait=True
-                )
-            logging.info(
-                f"Added {len(texts)} entries in batch to {self.collection_name}"
-            )
             return point_ids
         except Exception as e:
-            logging.error(f"Failed to add entries in batch: {e}")
-            raise QdrantOperationError(f"Failed to add entries in batch: {e}") from e
+            raise VectorStoreError(f"Failed to add entries in batch: {e}") from e
 
-    # Synchronous wrapper
     def add_entries_batch(
         self, texts: list[str], tags_list: list[list[str]] | None = None
     ) -> list[str]:
-        """Synchronous wrapper for add_entries_batch_async"""
         return asyncio.run(self.add_entries_batch_async(texts, tags_list))
 
     async def traverse_async(
         self, start_id: str, depth: int = 1, rel_types: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Traverse the graph from a starting point asynchronously"""
         if depth <= 0:
             return []
-
-        visited_ids = set()
-        queue = [(start_id, 0)]
-        result_nodes = []
-        processed_edges = set()
-
+        visited_ids: set[str] = set()
+        queue: list[tuple[str, int]] = [(start_id, 0)]
+        result_nodes: list[dict[str, Any]] = []
+        processed_edges: set[tuple[str, str, str | None]] = set()
         head = 0
         while head < len(queue):
             current_id, d = queue[head]
             head += 1
-
             if d > depth:
                 continue
-
             if current_id not in visited_ids:
                 visited_ids.add(current_id)
                 current_entry = await self.get_entry_async(current_id)
                 if not current_entry:
                     continue
-
                 current_entry["depth"] = d
                 result_nodes.append(current_entry)
-
             if d < depth:
                 relations = await self.get_relations_async(current_id)
                 for rel in relations:
                     target_id = rel.get("id")
                     relation_type = rel.get("type")
-
                     if not target_id:
                         continue
-
                     if rel_types is not None and relation_type not in rel_types:
                         continue
-
                     edge = (current_id, target_id, relation_type)
                     if edge in processed_edges:
                         continue
-
                     processed_edges.add(edge)
                     if target_id not in visited_ids:
                         queue.append((target_id, d + 1))
-
         return result_nodes
 
-    # Synchronous wrapper
     def traverse(
         self, start_id: str, depth: int = 1, rel_types: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Synchronous wrapper for traverse_async"""
         return asyncio.run(self.traverse_async(start_id, depth, rel_types))
 
     def add(self, text: str, tags: list[str] | None = None) -> str:
-        """Alias for add_entry"""
         return self.add_entry(text, tags)
 
     async def summarize_entry_async(self, entry_id: str) -> str:
-        """Summarize entry asynchronously"""
         entry = await self.get_entry_async(entry_id)
         return entry.get("text", "") if entry else ""
 
     def summarize_entry(self, entry_id: str) -> str:
-        """Synchronous wrapper for summarize_entry_async"""
         return asyncio.run(self.summarize_entry_async(entry_id))
 
     @asynccontextmanager
     async def batch_operations(self):
-        """Context manager for batch operations with proper error handling"""
         try:
             yield self
         finally:
-            # Ensure index is updated after batch operations
-            await self.wait_for_index(timeout=1.0)
+            pass
 
 
 class KnowledgeTree(VectorStoreBase):
-    """
-    Qdrant-based vector store for knowledge entries.
-    This class inherits all functionality from VectorStoreBase.
-    """
-
     def __init__(
         self,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "knowledge_tree",
         recreate_on_dim_mismatch: bool = False,
     ):
         super().__init__(
-            url=url,
+            db_path=db_path,
             collection_name=collection_name,
             recreate_on_dim_mismatch=recreate_on_dim_mismatch,
         )
@@ -744,15 +439,14 @@ class KnowledgeTree(VectorStoreBase):
     @classmethod
     async def create(
         cls,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "knowledge_tree",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
             Callable[[], Awaitable[tuple[Embeddings, int]]] | None
         ) = None,
     ) -> "KnowledgeTree":
-        """Factory method for async initialization"""
-        instance = cls(url, collection_name, recreate_on_dim_mismatch)
+        instance = cls(db_path, collection_name, recreate_on_dim_mismatch)
         instance._embedding_provider = (
             embedding_provider or EmbeddingProvider.create_embeddings
         )
@@ -765,9 +459,7 @@ class KnowledgeTree(VectorStoreBase):
         related_knowledge_id: str | None = None,
         tags: list[str] | None = None,
     ) -> str:
-        """Learn from experience asynchronously"""
         exp_id = await self.add_entry_async(text, tags)
-
         if related_knowledge_id:
             knowledge_entry = await self.get_entry_async(related_knowledge_id)
             if knowledge_entry:
@@ -776,9 +468,9 @@ class KnowledgeTree(VectorStoreBase):
                 )
             else:
                 logging.warning(
-                    f"Could not link experience {exp_id} to non-existent knowledge entry {related_knowledge_id}"
+                    f"Could not link experience {exp_id} to non-existent "
+                    f"knowledge entry {related_knowledge_id}"
                 )
-
         return exp_id
 
     def learn_from_experience(
@@ -787,44 +479,36 @@ class KnowledgeTree(VectorStoreBase):
         related_knowledge_id: str | None = None,
         tags: list[str] | None = None,
     ) -> str:
-        """Synchronous wrapper for learn_from_experience_async"""
         return asyncio.run(
             self.learn_from_experience_async(text, related_knowledge_id, tags)
         )
 
     async def learn_from_entry_async(self, entry_id: str, new_text: str) -> str:
-        """Learn from entry asynchronously"""
         original_entry = await self.get_entry_async(entry_id)
         if not original_entry:
             logging.warning(
-                f"Cannot learn from non-existent entry {entry_id}. Creating new entry directly."
+                f"Cannot learn from non-existent entry {entry_id}. "
+                f"Creating new entry directly."
             )
             return await self.add_entry_async(new_text)
-
         new_id = await self.add_entry_async(new_text)
         await self.add_relation_async(entry_id, new_id, rel_type="learned_from_this")
         await self.add_relation_async(new_id, entry_id, rel_type="learned_this_from")
         return new_id
 
     def learn_from_entry(self, entry_id: str, new_text: str) -> str:
-        """Synchronous wrapper for learn_from_entry_async"""
         return asyncio.run(self.learn_from_entry_async(entry_id, new_text))
 
 
 class ExperienceTree(KnowledgeTree):
-    """
-    Qdrant-based vector store for experience entries.
-    Inherits all functionality from KnowledgeTree.
-    """
-
     def __init__(
         self,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "experience_tree",
         recreate_on_dim_mismatch: bool = False,
     ):
         super().__init__(
-            url=url,
+            db_path=db_path,
             collection_name=collection_name,
             recreate_on_dim_mismatch=recreate_on_dim_mismatch,
         )
@@ -832,90 +516,16 @@ class ExperienceTree(KnowledgeTree):
     @classmethod
     async def create(
         cls,
-        url: str = QDRANT_URL,
+        db_path: str = VECTOR_DB_PATH,
         collection_name: str = "experience_tree",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
             Callable[[], Awaitable[tuple[Embeddings, int]]] | None
         ) = None,
     ) -> "ExperienceTree":
-        """Factory method for async initialization"""
-        instance = cls(url, collection_name, recreate_on_dim_mismatch)
+        instance = cls(db_path, collection_name, recreate_on_dim_mismatch)
         instance._embedding_provider = (
             embedding_provider or EmbeddingProvider.create_embeddings
         )
         await instance.async_init()
         return instance
-
-
-# Example usage (optional, for testing or demonstration)
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    # It's good practice to ensure QDRANT_URL and potentially EMBEDDING_MODEL_API_KEY are set
-    # in the environment if not using defaults, especially for OpenAIEmbeddings.
-
-    print(f"Attempting to use Qdrant at: {QDRANT_URL}")
-    print(f"Embedding model: {EMBED_MODEL}")
-
-    async def run_tests():
-        """Run tests asynchronously"""
-        try:
-            # Test KnowledgeTree with async initialization
-            kt = await KnowledgeTree.create(
-                collection_name="test_knowledge_tree_prod",
-                recreate_on_dim_mismatch=True,
-            )
-            await kt.clear_all_points_async()  # Start clean for test
-
-            entry_id1 = await kt.add_entry_async(
-                "The sky is blue.", tags=["nature", "color"]
-            )
-            entry_id2 = await kt.add_entry_async(
-                "The sun is bright.", tags=["nature", "light"]
-            )
-            await kt.add_relation_async(entry_id1, entry_id2, "related_fact")
-
-            print(f"KT Entry 1: {await kt.get_entry_async(entry_id1)}")
-            search_results_kt = await kt.search_async("celestial bodies")
-            print(f"KT Search for 'celestial bodies': {search_results_kt}")
-
-            traversed_kt = await kt.traverse_async(entry_id1, depth=1)
-            print(f"KT Traversal from {entry_id1} (depth 1): {traversed_kt}")
-
-            # Test ExperienceTree with async initialization
-            et = await ExperienceTree.create(
-                collection_name="test_experience_tree_prod",
-                recreate_on_dim_mismatch=True,
-            )
-            await et.clear_all_points_async()
-
-            exp_id1 = await et.learn_from_experience_async(
-                "User asked about weather. Agent said it is sunny.",
-                related_knowledge_id=entry_id2,
-                tags=["conversation"],
-            )
-            print(f"ET Experience 1: {await et.get_entry_async(exp_id1)}")
-
-            search_results_et = await et.search_async("sunny weather conversation")
-            print(f"ET Search for 'sunny weather conversation': {search_results_et}")
-
-            # Test batch operations context manager
-            async with kt.batch_operations():
-                batch_ids = await kt.add_entries_batch_async(
-                    ["Fact 1", "Fact 2", "Fact 3"],
-                    [["batch", "test"], ["batch", "test"], ["batch", "test"]],
-                )
-                print(f"Added batch entries: {batch_ids}")
-
-            print("Tests completed successfully.")
-
-        except QdrantOperationError as qe:
-            logging.error(f"A Qdrant operation failed during tests: {qe}")
-        except Exception as e:
-            logging.error(
-                f"An unexpected error occurred during tests: {e}", exc_info=True
-            )
-
-    # Run tests with proper async event loop
-    asyncio.run(run_tests())

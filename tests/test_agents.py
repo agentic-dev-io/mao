@@ -3,7 +3,6 @@ Tests for Agent and Supervisor classes.
 """
 
 import pytest
-import asyncio
 import uuid
 import os
 import logging
@@ -12,29 +11,19 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from mao.agents import create_agent, Supervisor, load_mcp_tools
 
-# Import pytest_asyncio if available
-try:
-    import pytest_asyncio
-
-    ASYNCIO_FIXTURE = pytest_asyncio.fixture
-except ImportError:
-    ASYNCIO_FIXTURE = pytest.fixture  # type: ignore
-
 # Configuration for tests — defaults to Ollama (local/cloud)
 TEST_LLM_PROVIDER = os.environ.get("TEST_LLM_PROVIDER", "ollama")
 TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
 
 
 @pytest.mark.asyncio
-async def test_create_agent_factory(knowledge_tree, experience_tree):
+async def test_create_agent_factory():
     """Test the agent factory function with basic parameters."""
     agent_name = f"test_agent_{uuid.uuid4().hex[:8]}"
     agent_app = await create_agent(
         provider=TEST_LLM_PROVIDER,
         model_name=TEST_LLM_MODEL,
         agent_name=agent_name,
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
         system_prompt="You are a test agent.",
     )
 
@@ -60,110 +49,44 @@ async def test_create_agent_factory(knowledge_tree, experience_tree):
 
 
 @pytest.mark.asyncio
-async def test_agent_learning_retrieval(knowledge_tree, experience_tree):
-    """Test that agent can learn from interactions and retrieve context."""
-    # Create agent with knowledge
+async def test_agent_multi_turn_conversation():
+    """Test that agent maintains coherence across multiple turns via thread_id."""
     agent_app = await create_agent(
         provider=TEST_LLM_PROVIDER,
         model_name=TEST_LLM_MODEL,
-        agent_name="learning_agent_test",
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
-        system_prompt="You learn from and remember conversations.",
+        agent_name="conversation_agent_test",
+        system_prompt="You remember conversations. Always answer concisely.",
     )
 
-    # Add knowledge entry
-    await knowledge_tree.add_entry_async(
-        "Python is a programming language created by Guido van Rossum."
-    )
+    thread_id = f"conversation_thread_{uuid.uuid4()}"
 
-    # First interaction to be learned
-    user_query = f"What is Python and who created it? [Test ID: {uuid.uuid4().hex[:8]}]"
-    thread_id = f"learning_thread_{uuid.uuid4()}"
-
-    # First invoke creates experience
+    # First turn: establish a fact
     await agent_app.ainvoke(
-        {"messages": [HumanMessage(content=user_query)]},
+        {"messages": [HumanMessage(content="My name is Wolfgang. Remember that.")]},
         config={"configurable": {"thread_id": thread_id}},
     )
 
-    # Multiple attempts to find the stored experience
-    max_attempts = 5
-    experience_found = False
-
-    for attempt in range(max_attempts):
-        # Give time for async operations to complete
-        await asyncio.sleep(1.0)
-
-        # Try multiple search terms
-        search_queries = [
-            user_query,
-            "Python programming",
-            "Guido van Rossum",
-            (
-                f"Test ID: {user_query.split('Test ID:')[-1].strip().rstrip(']')}"
-                if "Test ID:" in user_query
-                else ""
-            ),
-        ]
-
-        for query in search_queries:
-            if not query:
-                continue
-
-            search_results = await experience_tree.search_async(query, k=3)
-            if search_results:
-                experience_found = True
-                logging.info(
-                    f"Experience found on attempt {attempt+1} with query: {query}"
-                )
-                break
-
-        if experience_found:
-            break
-
-        logging.warning(
-            f"Experience search attempt {attempt+1}/{max_attempts} failed. Retrying..."
-        )
-
-    # Skip test if we can't find any experience
-    if not experience_found:
-        logging.error("Could not find stored experience after multiple attempts")
-        pytest.skip(
-            "Experience storage/retrieval is not working correctly, skipping assertion"
-        )
-
-    # Second query to test context retrieval with direct conversation flow
+    # Second turn: ask about the fact from the same thread
     follow_up_response = await agent_app.ainvoke(
-        {
-            "messages": [
-                HumanMessage(content=user_query),
-                AIMessage(
-                    content="Python is a programming language created by Guido van Rossum."
-                ),
-                HumanMessage(content="Who created Python again?"),
-            ]
-        },
+        {"messages": [HumanMessage(content="What is my name?")]},
         config={"configurable": {"thread_id": thread_id}},
     )
 
-    # Verify context was used
     last_message = follow_up_response["messages"][-1]
-    assert (
-        "Guido" in last_message.content
-    ), "Response should include previously provided information"
+    assert isinstance(last_message, AIMessage)
+    assert "Wolfgang" in last_message.content, (
+        "Agent should recall the name from the earlier turn in the same thread"
+    )
 
 
 @pytest.mark.asyncio
-async def test_supervisor_basic(knowledge_tree, experience_tree):
+async def test_supervisor_basic():
     """Test Supervisor with a simple worker agent."""
     # Create worker agent
     worker_agent = await create_agent(
         provider=TEST_LLM_PROVIDER,
         model_name=TEST_LLM_MODEL,
         agent_name="worker_agent",
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
         system_prompt="You are a helpful worker. Answer questions directly and concisely.",
     )
 
@@ -230,7 +153,7 @@ async def test_load_mcp_tools_function(mcp_client):
 
 
 @pytest.mark.asyncio
-async def test_agent_with_mcp_tools(knowledge_tree, experience_tree, mcp_client):
+async def test_agent_with_mcp_tools(mcp_client):
     """Test creating an agent with MCP tools."""
     # Check if MCP client works
     servers = mcp_client.list_servers()
@@ -246,11 +169,8 @@ async def test_agent_with_mcp_tools(knowledge_tree, experience_tree, mcp_client)
         provider=TEST_LLM_PROVIDER,
         model_name=TEST_LLM_MODEL,
         agent_name="mcp_tools_agent",
-        knowledge_tree=knowledge_tree,
-        experience_tree=experience_tree,
         tools=mcp_client,
         system_prompt="You are a helpful assistant with access to tools. Use the appropriate tool when needed.",
-        use_react_agent=True,
     )
 
     # Verify agent was created
