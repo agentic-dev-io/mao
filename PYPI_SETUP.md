@@ -22,8 +22,8 @@ PyPI's trusted publishing eliminates the need for API tokens by using OpenID Con
 3. Go to "Publishing" section
 4. Click "Add a new pending publisher"
 5. Fill in the details:
-   - **PyPI Project Name**: `mao`
-   - **Owner**: `bjoernbethge`
+   - **PyPI Project Name**: `mao-agents`
+   - **Owner**: `agentic-dev-io`
    - **Repository name**: `mao`
    - **Workflow name**: `publish.yml`
    - **Environment name**: (leave empty)
@@ -36,7 +36,7 @@ PyPI's trusted publishing eliminates the need for API tokens by using OpenID Con
 Once trusted publishing is configured, create the first release:
 
 1. Verify the version in `pyproject.toml` is set to `0.1.0`
-2. Go to https://github.com/bjoernbethge/mao/releases/new
+2. Go to https://github.com/agentic-dev-io/mao/releases/new
 3. Click "Choose a tag" and create a new tag: `v0.1.0`
 4. Set the release title: "mao v0.1.0 - Initial Release"
 5. Add release notes describing the package features:
@@ -72,7 +72,7 @@ For future releases:
 
 You can also trigger publishing manually without creating a release:
 
-1. Go to https://github.com/bjoernbethge/mao/actions/workflows/publish.yml
+1. Go to https://github.com/agentic-dev-io/mao/actions/workflows/publish.yml
 2. Click "Run workflow"
 3. Select the branch to publish from
 4. Optionally specify a version override
@@ -81,11 +81,11 @@ You can also trigger publishing manually without creating a release:
 ## Verifying the Package
 
 After publishing, verify your package at:
-- https://pypi.org/project/mao/
+- https://pypi.org/project/mao-agents/
 
 Install it using:
 ```bash
-pip install mao
+pip install mao-agents
 ```
 
 ## Changes in This PR

@@ -1,7 +1,7 @@
 [project]
-name = "mao"
+name = "mao-agents"
 version = "0.1.0"
-description = "MCP Agent Orchestra - A modern framework for orchestrating AI agents"
+description = "Multi Agent Orchestration - A modern framework for orchestrating AI agents"
 readme = "README.md"
 authors = [
     { name = "Björn Bethge", email = "" }

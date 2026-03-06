@@ -32,15 +32,15 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install build dependencies
-        run: uv pip install build twine
+        run: uv pip install --system build twine
 
       - name: Update version if provided
         if: github.event.inputs.version != ''
         run: |
-          python -c "import toml; d=toml.load('pyproject.toml'); d['project']['version']='${{ github.event.inputs.version }}'; toml.dump(d, open('pyproject.toml','w'))"
+          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" pyproject.toml
 
       - name: Build package
-        run: uv run python -m build
+        run: python -m build
 
       - name: Check package
         run: twine check dist/*
