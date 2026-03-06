@@ -3,7 +3,6 @@ Tests for the storage module (DuckDB-based vector stores).
 """
 
 import pytest
-from mao.storage import KnowledgeTree, ExperienceTree, VectorStoreError
 
 
 @pytest.mark.asyncio

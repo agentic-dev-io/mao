@@ -22,7 +22,7 @@ A modern framework for orchestrating AI agents. Self-contained — no external s
 - **Vector-based Memory** — DuckDB-powered vector storage with fastembed (no external DB needed)
 - **MCP Integration** — Model Context Protocol for agent-tool communication
 - **Multi-LLM Support** — OpenAI, Anthropic, Ollama
-- **Knowledge & Experience Trees** — Structured storage for agent knowledge
+- **Knowledge & Experience** — Automatic vector-based memory per agent
 - **Team Management** — Organize agents into collaborative teams with supervisors
 - **FastAPI** — REST API for agent management
 
@@ -42,18 +42,13 @@ uv sync
 ## Quick Start
 
 ```python
-from mao.agents import create_agent
-from mao.storage import KnowledgeTree, ExperienceTree
-
-knowledge = await KnowledgeTree.create(collection_name="agent-memory")
-experience = await ExperienceTree.create(collection_name="agent-experience")
+from mao import create_agent
 
 agent = await create_agent(
     provider="anthropic",
     model_name="claude-sonnet-4-20250514",
     agent_name="assistant",
-    knowledge_tree=knowledge,
-    experience_tree=experience,
+    system_prompt="You are a helpful data analyst.",
 )
 
 response = await agent.ainvoke(
