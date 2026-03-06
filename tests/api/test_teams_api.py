@@ -1,8 +1,15 @@
 """
-Tests für die Teams API Endpoints.
+Tests fuer die Teams API Endpoints.
 """
 
+import os
 import uuid
+
+from mao.api.agents import active_agents
+from mao.api.teams import active_teams
+
+TEST_LLM_PROVIDER = os.environ.get("TEST_LLM_PROVIDER", "ollama")
+TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
 
 
 def test_create_team(api_test_client):
@@ -440,3 +447,111 @@ def test_get_team_members(api_test_client):
     member_agent_ids = [m["agent_id"] for m in members]
     assert agent1_id in member_agent_ids
     assert agent2_id in member_agent_ids
+
+
+def test_start_team_runtime(api_test_client):
+    """Test starting a team with a real runtime path."""
+    client, _ = api_test_client
+    active_agents.clear()
+    active_teams.clear()
+
+    supervisor_agent_data = {
+        "name": "Runtime Supervisor Agent",
+        "provider": TEST_LLM_PROVIDER,
+        "model_name": TEST_LLM_MODEL,
+        "system_prompt": "You coordinate a small team.",
+    }
+    worker_agent_data = {
+        "name": "Runtime Worker Agent",
+        "provider": TEST_LLM_PROVIDER,
+        "model_name": TEST_LLM_MODEL,
+        "system_prompt": "You answer directly and concisely.",
+    }
+
+    supervisor_agent_id = client.post("/agents/", json=supervisor_agent_data).json()["id"]
+    worker_agent_id = client.post("/agents/", json=worker_agent_data).json()["id"]
+
+    supervisor_response = client.post(
+        "/teams/supervisors",
+        json={"agent_id": supervisor_agent_id, "strategy": "team_manager"},
+    )
+    assert supervisor_response.status_code == 201
+    supervisor_id = supervisor_response.json()["id"]
+
+    team_response = client.post(
+        "/teams/",
+        json={"name": "Runtime Team", "supervisor_id": supervisor_id},
+    )
+    assert team_response.status_code == 201
+    team_id = team_response.json()["id"]
+
+    member_response = client.post(
+        f"/teams/{team_id}/members",
+        json={"agent_id": worker_agent_id, "role": "assistant"},
+    )
+    assert member_response.status_code == 201
+
+    start_response = client.post(f"/teams/{team_id}/start")
+    assert start_response.status_code == 200
+    assert start_response.json()["status"] == "started"
+
+    running_response = client.get("/teams/running")
+    assert running_response.status_code == 200
+    assert running_response.json()["count"] >= 1
+
+
+def test_chat_with_team_runtime(api_test_client):
+    """Test chatting with a running team over the real runtime path."""
+    client, _ = api_test_client
+    active_agents.clear()
+    active_teams.clear()
+
+    supervisor_agent_data = {
+        "name": "Chat Supervisor Agent",
+        "provider": TEST_LLM_PROVIDER,
+        "model_name": TEST_LLM_MODEL,
+        "system_prompt": "Delegate to the worker and return the final answer.",
+    }
+    worker_agent_data = {
+        "name": "Chat Worker Agent",
+        "provider": TEST_LLM_PROVIDER,
+        "model_name": TEST_LLM_MODEL,
+        "system_prompt": "Reply with a short factual answer.",
+    }
+
+    supervisor_agent_id = client.post("/agents/", json=supervisor_agent_data).json()["id"]
+    worker_agent_id = client.post("/agents/", json=worker_agent_data).json()["id"]
+
+    supervisor_response = client.post(
+        "/teams/supervisors",
+        json={
+            "agent_id": supervisor_agent_id,
+            "system_prompt": "Coordinate the worker agent to answer the user.",
+            "strategy": "team_manager",
+        },
+    )
+    assert supervisor_response.status_code == 201
+    supervisor_id = supervisor_response.json()["id"]
+
+    team_response = client.post(
+        "/teams/",
+        json={"name": "Chat Runtime Team", "supervisor_id": supervisor_id},
+    )
+    assert team_response.status_code == 201
+    team_id = team_response.json()["id"]
+
+    member_response = client.post(
+        f"/teams/{team_id}/members",
+        json={"agent_id": worker_agent_id, "role": "assistant"},
+    )
+    assert member_response.status_code == 201
+
+    chat_response = client.post(
+        f"/teams/{team_id}/chat",
+        json={"content": "What is 2 + 2?", "thread_id": f"team_runtime_{uuid.uuid4().hex}"},
+    )
+    assert chat_response.status_code == 200
+    payload = chat_response.json()
+    assert payload["response"]
+    assert payload["thread_id"]
+    assert "details" in payload
