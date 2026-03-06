@@ -147,13 +147,14 @@ class Agent:
         self.llm = llm_instance
         self.name = agent_name
         self.configured_tools = tools
-        self.loaded_tools: list[dict[str, Any]] = []
+        self.loaded_tools: list[Any] = []
         self.system_prompt = system_prompt or "You are a helpful assistant."
         self.knowledge_tree: KnowledgeTree | None = None
         self.experience_tree: ExperienceTree | None = None
         self.memory = MemorySaver()
         self.stream = stream
         self.agent_runnable = None
+        self.tool_agent_runnable = None
 
     async def _load_mcp_tools(self) -> list[dict[str, Any]]:
         return await load_mcp_tools(self.configured_tools)
@@ -198,14 +199,7 @@ class Agent:
             exp_text, related_knowledge_id=knowledge_id, tags=tags
         )
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
-    )
-    async def _call_model_node(
-        self, state: MessagesState, config: RunnableConfig | None = None
-    ) -> dict[str, list[BaseMessage]]:
+    async def _build_messages_for_llm(self, state: MessagesState) -> tuple[list[BaseMessage], str]:
         user_input_raw = state["messages"][-1].content if state["messages"] else ""
         user_input = _ensure_str(user_input_raw)
         context_str = _ensure_str(await self._retrieve_context(user_input))
@@ -229,13 +223,20 @@ class Agent:
         messages_for_llm: list[BaseMessage] = [
             SystemMessage(content=system_content)
         ] + trimmed_messages_list
+        return messages_for_llm, user_input
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+    )
+    async def _call_model_node(
+        self, state: MessagesState, config: RunnableConfig | None = None
+    ) -> dict[str, list[BaseMessage]]:
+        messages_for_llm, user_input = await self._build_messages_for_llm(state)
 
         try:
             llm = self.llm
-            tools = _dicts_to_tools(self.loaded_tools)
-            if tools and hasattr(llm, "bind_tools"):
-                llm = llm.bind_tools(tools)
-
             invoked_response = await llm.ainvoke(messages_for_llm, config=config)
             response_message, learn_content = await _process_llm_response(
                 invoked_response,
@@ -244,6 +245,38 @@ class Agent:
             return {"messages": [response_message]}
         except Exception as e:
             logger.error("Agent '%s' model call failed: %s", self.name, e, exc_info=True)
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+    )
+    async def _call_agent_node(
+        self, state: MessagesState, config: RunnableConfig | None = None
+    ) -> dict[str, list[BaseMessage]]:
+        if self.tool_agent_runnable is None:
+            raise RuntimeError("Agent runnable not initialized.")
+
+        messages_for_llm, user_input = await self._build_messages_for_llm(state)
+
+        try:
+            response = await self.tool_agent_runnable.ainvoke(
+                {"messages": messages_for_llm},
+                config=config,
+            )
+            if isinstance(response, dict) and response.get("messages"):
+                response_message = response["messages"][-1]
+            else:
+                response_message = response
+
+            processed_message, learn_content = await _process_llm_response(
+                response_message,
+            )
+            await self._learn_experience(user_input, learn_content)
+            return {"messages": [processed_message]}
+        except Exception as e:
+            logger.error("Agent '%s' tool call failed: %s", self.name, e, exc_info=True)
             raise
 
     def _build_rag_tools(self) -> list[BaseTool]:
@@ -267,6 +300,7 @@ class Agent:
 
         if self.experience_tree:
             et = self.experience_tree
+            kt = self.knowledge_tree
 
             @tool
             async def retrieve_experience(query: str) -> str:
@@ -281,6 +315,25 @@ class Agent:
                 return "\n".join(h["page_content"] for h in hits)
 
             tools.append(retrieve_experience)
+
+            @tool
+            async def save_experience(summary: str) -> str:
+                """Save a summary of what was learned or accomplished for future reference.
+
+                Args:
+                    summary: Brief summary of the interaction outcome or lesson learned
+                """
+                knowledge_id = None
+                if kt:
+                    hits = await kt.search_async(summary, k=1)
+                    if hits:
+                        knowledge_id = hits[0].get("id")
+                await et.learn_from_experience_async(
+                    summary, related_knowledge_id=knowledge_id
+                )
+                return "Experience saved."
+
+            tools.append(save_experience)
 
         return tools
 
@@ -299,31 +352,32 @@ class Agent:
             self.loaded_tools.extend(rag_tools)
             logger.info("Agent '%s' loaded %d tools (%d RAG)", self.name, len(self.loaded_tools), len(rag_tools))
 
+            workflow = StateGraph(MessagesState)
             if self.loaded_tools:
                 all_tools = _dicts_to_tools(self.loaded_tools)
-                self.agent_runnable = lc_create_agent(
+                self.tool_agent_runnable = lc_create_agent(
                     model=self.llm,
                     tools=all_tools,
                     system_prompt=self.system_prompt,
-                    checkpointer=self.memory,
                     name=self.name,
                 )
+                workflow.add_node("agent_node", self._call_agent_node)
                 logger.info(
                     "Agent '%s' created with create_agent and %d tools.",
                     self.name,
                     len(self.loaded_tools),
                 )
-                return self.agent_runnable
-
-            workflow = StateGraph(MessagesState)
-            workflow.add_node("model_node", self._call_model_node)
-            workflow.add_edge(START, "model_node")
-            workflow.add_edge("model_node", END)
+                workflow.add_edge(START, "agent_node")
+                workflow.add_edge("agent_node", END)
+            else:
+                workflow.add_node("model_node", self._call_model_node)
+                workflow.add_edge(START, "model_node")
+                workflow.add_edge("model_node", END)
 
             self.agent_runnable = workflow.compile(
                 checkpointer=self.memory, name=self.name
             )
-            logger.info("Agent '%s' compiled as custom graph (no tools).", self.name)
+            logger.info("Agent '%s' compiled as custom graph.", self.name)
             return self.agent_runnable
         except Exception as e:
             logger.error("Failed to initialize agent '%s': %s", self.name, e, exc_info=True)

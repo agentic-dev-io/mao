@@ -17,8 +17,13 @@ import duckdb
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.embeddings import Embeddings
 
-VECTOR_DB_PATH: str = os.environ.get("VECTOR_DB_PATH", "mao_vectors.duckdb")
+DEFAULT_VECTOR_DB_PATH = "mao_vectors.duckdb"
 BATCH_SIZE: int = int(os.environ.get("VECTOR_BATCH_SIZE", "32"))
+_DUCKDB_CONNECTIONS: dict[str, duckdb.DuckDBPyConnection] = {}
+
+
+def get_vector_db_path() -> str:
+    return os.environ.get("VECTOR_DB_PATH", DEFAULT_VECTOR_DB_PATH)
 
 
 class SearchResult(TypedDict):
@@ -54,7 +59,7 @@ class VectorStoreError(Exception):
 class VectorStoreBase:
     def __init__(
         self,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "default_collection",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
@@ -62,15 +67,22 @@ class VectorStoreBase:
         ) = None,
     ):
         self.collection_name = collection_name
-        self.db_path = db_path
+        self.db_path = db_path or get_vector_db_path()
         self.recreate_on_dim_mismatch = recreate_on_dim_mismatch
-        self.conn = duckdb.connect(db_path)
+        self.conn = self._get_connection(self.db_path)
 
         self.embed: Embeddings | None = None
         self.embed_dim: int | None = None
         self._embedding_provider = (
             embedding_provider or EmbeddingProvider.create_embeddings
         )
+
+    @staticmethod
+    def _get_connection(db_path: str) -> duckdb.DuckDBPyConnection:
+        normalized_path = ":memory:" if db_path == ":memory:" else os.path.abspath(db_path)
+        if normalized_path not in _DUCKDB_CONNECTIONS:
+            _DUCKDB_CONNECTIONS[normalized_path] = duckdb.connect(normalized_path)
+        return _DUCKDB_CONNECTIONS[normalized_path]
 
     async def async_init(self) -> "VectorStoreBase":
         self.embed, self.embed_dim = await self._embedding_provider()
@@ -84,7 +96,7 @@ class VectorStoreBase:
     @classmethod
     async def create(
         cls,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "default_collection",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
@@ -426,7 +438,7 @@ class VectorStoreBase:
 class KnowledgeTree(VectorStoreBase):
     def __init__(
         self,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "knowledge_tree",
         recreate_on_dim_mismatch: bool = False,
     ):
@@ -439,7 +451,7 @@ class KnowledgeTree(VectorStoreBase):
     @classmethod
     async def create(
         cls,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "knowledge_tree",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (
@@ -503,7 +515,7 @@ class KnowledgeTree(VectorStoreBase):
 class ExperienceTree(KnowledgeTree):
     def __init__(
         self,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "experience_tree",
         recreate_on_dim_mismatch: bool = False,
     ):
@@ -516,7 +528,7 @@ class ExperienceTree(KnowledgeTree):
     @classmethod
     async def create(
         cls,
-        db_path: str = VECTOR_DB_PATH,
+        db_path: str | None = None,
         collection_name: str = "experience_tree",
         recreate_on_dim_mismatch: bool = False,
         embedding_provider: (

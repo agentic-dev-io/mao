@@ -16,6 +16,23 @@ TEST_LLM_PROVIDER = os.environ.get("TEST_LLM_PROVIDER", "ollama")
 TEST_LLM_MODEL = os.environ.get("TEST_LLM_MODEL", "gemma3:4b-cloud")
 
 
+@pytest.fixture(autouse=True)
+def isolated_vector_db():
+    previous_vector_db_path = os.environ.get("VECTOR_DB_PATH")
+    base_tmp_dir = os.path.join(os.getcwd(), ".test_tmp")
+    os.makedirs(base_tmp_dir, exist_ok=True)
+    os.environ["VECTOR_DB_PATH"] = os.path.join(
+        base_tmp_dir, f"agent_vectors_{uuid.uuid4().hex}.duckdb"
+    )
+    try:
+        yield
+    finally:
+        if previous_vector_db_path is None:
+            os.environ.pop("VECTOR_DB_PATH", None)
+        else:
+            os.environ["VECTOR_DB_PATH"] = previous_vector_db_path
+
+
 @pytest.mark.asyncio
 async def test_create_agent_factory():
     """Test the agent factory function with basic parameters."""

@@ -10,11 +10,13 @@ import httpx
 import socket
 import time
 import threading
+import uuid
 import uvicorn
 from dotenv import load_dotenv
 from mao.mcp import MCPClient
 from fastapi.testclient import TestClient
 from mao.api.api import MCPAgentsAPI
+from mao.api.db import ConfigDB
 
 load_dotenv()
 
@@ -39,11 +41,32 @@ async def mcp_client():
 
 @pytest.fixture(scope="function")
 def api_test_client():
+    base_tmp_dir = os.path.join(os.getcwd(), ".test_tmp")
+    os.makedirs(base_tmp_dir, exist_ok=True)
+
+    previous_mcp_db_path = os.environ.get("MCP_DB_PATH")
+    previous_vector_db_path = os.environ.get("VECTOR_DB_PATH")
+    test_run_id = uuid.uuid4().hex
+    os.environ["MCP_DB_PATH"] = os.path.join(base_tmp_dir, f"api_{test_run_id}.duckdb")
+    os.environ["VECTOR_DB_PATH"] = os.path.join(
+        base_tmp_dir, f"api_vectors_{test_run_id}.duckdb"
+    )
     test_api = MCPAgentsAPI(
         db_path=":memory:", title="Test MCP Agents API", version="test"
     )
     client = TestClient(test_api)
-    return client, test_api
+    try:
+        yield client, test_api
+    finally:
+        asyncio.run(ConfigDB.cleanup())
+        if previous_mcp_db_path is None:
+            os.environ.pop("MCP_DB_PATH", None)
+        else:
+            os.environ["MCP_DB_PATH"] = previous_mcp_db_path
+        if previous_vector_db_path is None:
+            os.environ.pop("VECTOR_DB_PATH", None)
+        else:
+            os.environ["VECTOR_DB_PATH"] = previous_vector_db_path
 
 
 def find_free_port():

@@ -6,36 +6,43 @@ import logging
 from typing import Any
 
 from ..agents import create_agent
+from ..mcp import MCPClient
 from .db import ConfigDB
 
+logger = logging.getLogger(__name__)
 
-async def convert_db_tools_to_list(
-    agent_tools: list[dict[str, Any]],
-) -> list[dict[str, Any]] | None:
-    """
-    Convert database tool objects to a list of tool descriptions.
 
-    Args:
-        agent_tools: List of tool dictionaries from the database
+def _db_server_to_mcp_config(server: dict[str, Any]) -> dict[str, Any]:
+    config: dict[str, Any] = {"transport": server["transport"]}
+    for key in ("url", "command", "args", "headers", "timeout"):
+        if server.get(key):
+            config[key] = server[key]
+    if server.get("env_vars"):
+        config["env"] = server["env_vars"]
+    return config
 
-    Returns:
-        List of tool descriptions or None if conversion fails
-    """
-    if not agent_tools:
+
+async def _build_mcp_client_from_db(
+    db: ConfigDB, agent_tools: list[dict[str, Any]]
+) -> MCPClient | None:
+    server_ids = {t.get("server_id") for t in agent_tools if t.get("server_id")}
+    if not server_ids:
+        skipped = [t.get("name") for t in agent_tools]
+        logger.warning("Tools without server_id cannot execute: %s", skipped)
         return None
 
-    try:
-        return [
-            {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("parameters", {}),
-            }
-            for tool in agent_tools
-        ]
-    except Exception as e:
-        logging.warning(f"Failed to convert tools: {e}")
+    mcp_servers_config: dict[str, Any] = {}
+    for sid in server_ids:
+        server = await db.get_server(sid)
+        if server and server.get("enabled"):
+            mcp_servers_config[server["name"]] = _db_server_to_mcp_config(server)
+        elif server:
+            logger.warning("Server '%s' is disabled, skipping", server.get("name"))
+
+    if not mcp_servers_config:
         return None
+
+    return MCPClient(config={"mcpServers": mcp_servers_config})
 
 
 async def create_and_start_agent(
@@ -44,32 +51,16 @@ async def create_and_start_agent(
     agent_config: dict[str, Any],
     active_agents: dict[str, dict[str, Any]],
 ) -> Any:
-    """
-    Create and start an agent, loading its tools from the database.
-
-    Args:
-        db: Database connection
-        agent_id: ID of the agent
-        agent_config: Agent configuration dictionary
-        active_agents: Dictionary of active agents to update
-
-    Returns:
-        The created agent app
-    """
-    # Get tools for the agent
     agent_tools = await db.get_agent_tools(agent_id, enabled_only=True)
-    tools = await convert_db_tools_to_list(agent_tools) if agent_tools else None
+    mcp_client = await _build_mcp_client_from_db(db, agent_tools) if agent_tools else None
 
-    # Create and start the agent
     agent_app = await create_agent(
         provider=agent_config["provider"],
         model_name=agent_config["model_name"],
         agent_name=agent_config["name"],
         system_prompt=agent_config.get("system_prompt"),
-        tools=tools,
+        tools=mcp_client,
     )
 
-    # Add agent to active agents
     active_agents[agent_id] = {"agent": agent_app, "config": agent_config}
-
     return agent_app

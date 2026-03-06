@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..agents import Supervisor, create_agent
 from .api import active_agents, get_config_db
@@ -33,6 +34,115 @@ router = APIRouter(prefix="/teams", tags=["teams"])
 # Global state for active supervisors and teams
 active_supervisors: dict[str, dict[str, Any]] = {}
 active_teams: dict[str, dict[str, Any]] = {}
+
+
+def _extract_response_text(response: Any) -> tuple[str, str | None]:
+    if isinstance(response, dict) and response.get("messages"):
+        last_message = response["messages"][-1]
+        if hasattr(last_message, "content"):
+            return str(last_message.content), getattr(last_message, "name", None)
+        if isinstance(last_message, dict):
+            return str(last_message.get("content", "")), last_message.get("name")
+    if hasattr(response, "content"):
+        return str(response.content), getattr(response, "name", None)
+    return str(response), None
+
+
+async def _start_team_runtime(
+    team_id: str, db: ConfigDB
+) -> dict[str, Any]:
+    if team_id in active_teams:
+        return active_teams[team_id]
+
+    team_config = await db.get_team(team_id)
+    if not team_config:
+        raise HTTPException(status_code=404, detail=f"Team {team_id} not found")
+
+    members = await db.get_team_members(team_id, active_only=True)
+    if not members:
+        raise HTTPException(
+            status_code=400, detail=f"Team {team_id} has no active members"
+        )
+
+    try:
+        for member in members:
+            agent_id = member["agent_id"]
+            if agent_id not in active_agents:
+                agent_config = await db.get_agent(agent_id)
+                if agent_config:
+                    await create_and_start_agent(db, agent_id, agent_config, active_agents)
+
+        supervisor_app = None
+        supervisor_id = team_config.get("supervisor_id")
+        supervisor_config = None
+
+        if supervisor_id:
+            supervisor_config = await db.get_supervisor(supervisor_id)
+            if supervisor_config:
+                agent_apps = [
+                    active_agents[member["agent_id"]]["agent"]
+                    for member in members
+                    if member["agent_id"] in active_agents
+                ]
+
+                supervisor_agent_id = supervisor_config["agent_id"]
+                if supervisor_agent_id not in active_agents:
+                    supervisor_agent_config = await db.get_agent(supervisor_agent_id)
+                    if not supervisor_agent_config:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Supervisor agent {supervisor_agent_id} not found",
+                        )
+
+                    supervisor_agent_app = await create_agent(
+                        provider=supervisor_agent_config["provider"],
+                        model_name=supervisor_agent_config["model_name"],
+                        agent_name=supervisor_agent_config["name"],
+                        system_prompt=supervisor_agent_config.get("system_prompt"),
+                    )
+                    active_agents[supervisor_agent_id] = {
+                        "agent": supervisor_agent_app,
+                        "config": supervisor_agent_config,
+                    }
+
+                supervisor_params = {
+                    "add_handoff_back_messages": supervisor_config.get(
+                        "add_handoff_back_messages", True
+                    ),
+                    "parallel_tool_calls": supervisor_config.get(
+                        "parallel_tool_calls", True
+                    ),
+                }
+                config_value = supervisor_config.get("config")
+                if isinstance(config_value, dict):
+                    supervisor_params.update(config_value)
+
+                supervisor = Supervisor(
+                    agents=agent_apps,
+                    supervisor_provider=active_agents[supervisor_agent_id]["config"][
+                        "provider"
+                    ],
+                    supervisor_model_name=active_agents[supervisor_agent_id]["config"][
+                        "model_name"
+                    ],
+                    supervisor_system_prompt=supervisor_config.get("system_prompt")
+                    or "You are a supervisor that coordinates a team of specialized agents.",
+                    **supervisor_params,
+                )
+                supervisor_app = await supervisor.init_supervisor()
+
+        active_teams[team_id] = {
+            "config": team_config,
+            "members": members,
+            "supervisor": supervisor_app,
+            "supervisor_config": supervisor_config,
+        }
+        return active_teams[team_id]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception(f"Failed to start team {team_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start team: {str(e)}")
 
 
 # Team management endpoints
@@ -394,129 +504,8 @@ async def start_team(team_id: str, db: ConfigDB = Depends(get_config_db)):
     if team_id in active_teams:
         # Team is already running
         return {"status": "already_running", "team_id": team_id}
-
-    team_config = await db.get_team(team_id)
-    if not team_config:
-        raise HTTPException(status_code=404, detail=f"Team {team_id} not found")
-
-    # Get team members
-    members = await db.get_team_members(team_id, active_only=True)
-    if not members:
-        raise HTTPException(
-            status_code=400, detail=f"Team {team_id} has no active members"
-        )
-
-    try:
-        # Start all agent team members if they aren't already running
-        for member in members:
-            agent_id = member["agent_id"]
-            if agent_id not in active_agents:
-                agent_config = await db.get_agent(agent_id)
-                if agent_config:
-                    await create_and_start_agent(
-                        db, agent_id, agent_config, active_agents
-                    )
-
-        # Handle supervisor if configured
-        supervisor_app = None
-        supervisor_id = team_config.get("supervisor_id")
-        supervisor_config = None
-
-        if supervisor_id:
-            supervisor_config = await db.get_supervisor(supervisor_id)
-            if supervisor_config:
-                # Get all agents in this team
-                agent_instances = []
-                for member in members:
-                    agent_id = member["agent_id"]
-                    if agent_id in active_agents:
-                        agent_instances.append(
-                            {
-                                "agent": active_agents[agent_id]["agent"],
-                                "role": member["role"],
-                                "name": active_agents[agent_id]["config"]["name"],
-                            }
-                        )
-
-                # Get supervisor agent configuration
-                supervisor_agent_id = supervisor_config["agent_id"]
-                if supervisor_agent_id not in active_agents:
-                    supervisor_agent_config = await db.get_agent(supervisor_agent_id)
-                    if not supervisor_agent_config:
-                        raise HTTPException(
-                            status_code=404,
-                            detail=f"Supervisor agent {supervisor_agent_id} not found",
-                        )
-
-                    # Create the supervisor agent if not already active
-                    supervisor_agent_app = await create_agent(
-                        provider=supervisor_agent_config["provider"],
-                        model_name=supervisor_agent_config["model_name"],
-                        agent_name=supervisor_agent_config["name"],
-                        system_prompt=supervisor_agent_config.get("system_prompt"),
-                        use_react_agent=supervisor_agent_config.get(
-                            "use_react_agent", True
-                        ),
-                        max_tokens_trimmed=supervisor_agent_config.get(
-                            "max_tokens_trimmed", 3000
-                        ),
-                        llm_specific_kwargs=supervisor_agent_config.get(
-                            "llm_specific_kwargs"
-                        ),
-                    )
-                    active_agents[supervisor_agent_id] = {
-                        "agent": supervisor_agent_app,
-                        "config": supervisor_agent_config,
-                    }
-
-                # Initialize supervisor
-                # Get the actual agent instances from active_agents
-                agent_apps = [a["agent"] for a in agent_instances]
-
-                # Extract supervisor-specific parameters from config
-                supervisor_params = {
-                    "add_handoff_back_messages": supervisor_config.get(
-                        "add_handoff_back_messages", True
-                    ),
-                    "parallel_tool_calls": supervisor_config.get(
-                        "parallel_tool_calls", True
-                    ),
-                }
-
-                # Add any additional configuration from the supervisor_config.config field
-                config_value = supervisor_config.get("config")
-                if isinstance(config_value, dict):
-                    supervisor_params.update(config_value)
-
-                # Create the supervisor
-                supervisor = Supervisor(
-                    agents=agent_apps,
-                    supervisor_provider=active_agents[supervisor_agent_id]["config"][
-                        "provider"
-                    ],
-                    supervisor_model_name=active_agents[supervisor_agent_id]["config"][
-                        "model_name"
-                    ],
-                    supervisor_system_prompt=supervisor_config.get("system_prompt")
-                    or "You are a supervisor that coordinates a team of specialized agents.",
-                    **supervisor_params,  # Pass all supervisor-specific parameters
-                )
-
-                # Initialize the supervisor
-                supervisor_app = await supervisor.init_supervisor()
-
-        # Add team to active teams
-        active_teams[team_id] = {
-            "config": team_config,
-            "members": members,
-            "supervisor": supervisor_app,
-            "supervisor_config": supervisor_config,
-        }
-
-        return {"status": "started", "team_id": team_id}
-    except Exception as e:
-        logging.exception(f"Failed to start team {team_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start team: {str(e)}")
+    await _start_team_runtime(team_id, db)
+    return {"status": "started", "team_id": team_id}
 
 
 @router.post("/{team_id}/stop", status_code=200)
@@ -549,120 +538,39 @@ async def chat_with_team(
     if not team["supervisor_id"]:
         raise HTTPException(status_code=400, detail="Team does not have a supervisor")
 
-    # Get supervisor
-    supervisor_id = team["supervisor_id"]
-    supervisor_config = await db.get_supervisor(supervisor_id)
-    if not supervisor_config:
-        raise HTTPException(
-            status_code=404, detail=f"Supervisor {supervisor_id} not found"
-        )
-
-    # Get supervisor agent
-    agent_id = supervisor_config["agent_id"]
-
-    # Check if supervisor agent is running
-    if agent_id not in active_agents:
-        # Try to start the agent
-        agent_config = await db.get_agent(agent_id)
-        if not agent_config:
-            raise HTTPException(
-                status_code=404, detail=f"Supervisor agent {agent_id} not found"
-            )
-
-        try:
-            # Create and start the agent
-            agent_app = await create_agent(
-                provider=agent_config["provider"],
-                model_name=agent_config["model_name"],
-                agent_name=agent_config["name"],
-                system_prompt=supervisor_config.get("system_prompt")
-                or agent_config.get("system_prompt"),
-                use_react_agent=agent_config.get("use_react_agent", True),
-                max_tokens_trimmed=agent_config.get("max_tokens_trimmed", 3000),
-                llm_specific_kwargs=agent_config.get("llm_specific_kwargs"),
-            )
-
-            # Add agent to active agents
-            active_agents[agent_id] = {"agent": agent_app, "config": agent_config}
-        except Exception as e:
-            logging.exception(f"Failed to start supervisor agent {agent_id}: {e}")
-            raise HTTPException(
-                status_code=500, detail=f"Failed to start supervisor agent: {str(e)}"
-            )
-
-    # Get team members
-    members = await db.get_team_members(team_id, active_only=True)
-    if not members:
-        raise HTTPException(status_code=400, detail="Team has no active members")
-
-    # Create supervisor
     try:
-        supervisor = Supervisor(
-            agents=[active_agents[agent_id]["agent"]],
-            supervisor_provider=active_agents[agent_id]["config"]["provider"],
-            supervisor_model_name=active_agents[agent_id]["config"]["model_name"],
-            supervisor_system_prompt=supervisor_config.get("system_prompt")
-            or "You are a supervisor that coordinates a team of specialized agents.",
-        )
+        runtime = await _start_team_runtime(team_id, db)
+        supervisor_app = runtime.get("supervisor")
+        if supervisor_app is None:
+            raise HTTPException(status_code=400, detail="Team supervisor is not running")
 
-        # Add team members to supervisor
-        for member in members:
-            # Check if member agent is running
-            member_agent_id = member["agent_id"]
-            if member_agent_id not in active_agents:
-                # Try to start the agent
-                member_agent_config = await db.get_agent(member_agent_id)
-                if not member_agent_config:
-                    continue  # Skip this member
-
-                try:
-                    # Create and start the agent
-                    member_agent_app = await create_agent(
-                        provider=member_agent_config["provider"],
-                        model_name=member_agent_config["model_name"],
-                        agent_name=member_agent_config["name"],
-                        system_prompt=member_agent_config.get("system_prompt"),
-                        use_react_agent=member_agent_config.get(
-                            "use_react_agent", True
-                        ),
-                        max_tokens_trimmed=member_agent_config.get(
-                            "max_tokens_trimmed", 3000
-                        ),
-                        llm_specific_kwargs=member_agent_config.get(
-                            "llm_specific_kwargs"
-                        ),
-                    )
-
-                    # Add agent to active agents
-                    active_agents[member_agent_id] = {
-                        "agent": member_agent_app,
-                        "config": member_agent_config,
-                    }
-                except Exception as e:
-                    logging.warning(
-                        f"Failed to start team member agent {member_agent_id}: {e}"
-                    )
-                    continue  # Skip this member
-
-            # Add member to supervisor
-            if hasattr(supervisor, "add_agent"):
-                supervisor.add_agent(
-                    agent=active_agents[member_agent_id]["agent"],
-                    role=member["role"],
-                    order=member.get("order_index"),
-                )
-
-        # Send message to supervisor
         thread_id = message.thread_id or f"team_{team_id}_thread_{uuid.uuid4().hex}"
+        response = await supervisor_app.ainvoke(
+            {"messages": [HumanMessage(content=message.content)]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        response_text, responding_agent_id = _extract_response_text(response)
 
-        if hasattr(supervisor, "run"):
-            response = await supervisor.run(message.content, thread_id=thread_id)
-        else:
-            raise HTTPException(
-                status_code=500, detail="Supervisor does not have a run method"
-            )
+        trace = None
+        if isinstance(response, dict) and response.get("messages"):
+            trace = []
+            for msg in response["messages"]:
+                if isinstance(msg, (AIMessage, HumanMessage)):
+                    trace.append(
+                        {
+                            "agent": getattr(msg, "name", None),
+                            "type": msg.__class__.__name__,
+                            "content": str(msg.content),
+                        }
+                    )
 
-        return {"response": response, "thread_id": thread_id}
+        return {
+            "response": response_text,
+            "thread_id": thread_id,
+            "responding_agent_id": responding_agent_id,
+            "trace": trace,
+            "details": response if isinstance(response, dict) else {"raw_response": str(response)},
+        }
     except Exception as e:
         logging.exception(f"Error in team chat: {e}")
         raise HTTPException(
