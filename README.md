@@ -14,6 +14,8 @@
   </p>
 </div>
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/agentic-dev-io/mao)
+
 A modern framework for orchestrating AI agents. Self-contained — no external services required for vector storage or embeddings.
 
 ## Features
