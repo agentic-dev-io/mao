@@ -25,7 +25,10 @@ dependencies = [
     "langgraph>=1.0,<2.0",
     "typing-extensions>=4.13.0",
     "tenacity>=8.5.0",
-    "fastembed>=0.7.4",
+    "langchain-huggingface>=1.2.1",
+    "sentence-transformers>=5.2.3",
+    # security: explicit minimum for vulnerable transitive dep
+    "pillow>=12.1.1",
 ]
 
 [tool.uv]

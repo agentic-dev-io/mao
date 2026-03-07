@@ -21,7 +21,7 @@ A modern framework for orchestrating AI agents. Self-contained — no external s
 ## Features
 
 - **Agent Orchestration** — Multi-agent workflows with LangGraph
-- **Vector-based Memory** — DuckDB-powered vector storage with fastembed (no external DB needed)
+- **Vector-based Memory** — DuckDB-powered vector storage with SentenceTransformers embeddings (no external DB needed)
 - **MCP Integration** — Model Context Protocol for agent-tool communication
 - **Multi-LLM Support** — OpenAI, Anthropic, Ollama
 - **Knowledge & Experience** — Automatic vector-based memory per agent

@@ -7,11 +7,23 @@ import asyncio
 import json
 import logging
 import os
+import re
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 
 import duckdb
+
+_VALID_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+
+def _validate_identifier(name: str) -> str:
+    if not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid identifier '{name}': must match [a-zA-Z_][a-zA-Z0-9_]{{0,63}}"
+        )
+    return name
 
 
 class ConfigDB:
@@ -27,8 +39,7 @@ class ConfigDB:
     """
 
     _instances: dict[str, "ConfigDB"] = {}
-    _lock = asyncio.Lock()
-    _lock = asyncio.Lock()
+    _lock = threading.Lock()
     _agent_select_columns = (
         "id, name, provider, model_name, system_prompt, created_at, updated_at"
     )
@@ -40,19 +51,8 @@ class ConfigDB:
 
     @classmethod
     async def get_instance(cls, db_path: str = "mcp_config.duckdb") -> "ConfigDB":
-        """
-        Get or create a ConfigDB instance with the given path.
-        Uses a singleton pattern to reuse database connections.
-
-        Args:
-            db_path: Path to the DuckDB database file
-
-        Returns:
-            ConfigDB instance
-        """
-        async with cls._lock:
+        with cls._lock:
             if db_path not in cls._instances:
-                # Create new instance
                 instance = cls(db_path)
                 cls._instances[db_path] = instance
             return cls._instances[db_path]
@@ -246,7 +246,12 @@ class ConfigDB:
 
         for column_name in self._agent_legacy_columns:
             if column_name in existing_columns:
-                conn.execute(f"ALTER TABLE agents DROP COLUMN {column_name}")
+                try:
+                    conn.execute(f"ALTER TABLE agents DROP COLUMN {column_name}")
+                except duckdb.Error as e:
+                    logging.warning(
+                        "Could not drop legacy column '%s': %s", column_name, e
+                    )
 
     def _process_result(self, result: tuple | Any, table_name: str) -> dict[str, Any]:
         """Process a database result into a dictionary"""
@@ -389,10 +394,13 @@ class ConfigDB:
         Returns:
             Tuple of (query string, parameters list)
         """
+        _validate_identifier(table)
+        _validate_identifier(id_column)
         set_clauses = []
         params: list[Any] = []
 
         for key, value in kwargs.items():
+            _validate_identifier(key)
             if key in json_fields:
                 set_clauses.append(f"{key} = ?")
                 params.append(json.dumps(value) if value is not None else None)
@@ -1110,7 +1118,7 @@ class ConfigDB:
     @classmethod
     async def cleanup(cls):
         """Close all database connections"""
-        async with cls._lock:
+        with cls._lock:
             for db_path, instance in cls._instances.items():
                 await instance.close_async()
             cls._instances.clear()

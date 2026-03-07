@@ -70,7 +70,6 @@ class MCPAgentsAPI(FastAPI):
         )
 
         self.db_path = db_path or os.environ.get("MCP_DB_PATH", "mcp_config.duckdb")
-        self.active_agents: dict[str, dict[str, Any]] = {}
 
         # Add middleware
         self._setup_middleware()
@@ -87,10 +86,11 @@ class MCPAgentsAPI(FastAPI):
     def _setup_middleware(self):
         """Setup middleware for the API"""
         # CORS middleware
+        cors_origins = os.environ.get("MAO_CORS_ORIGINS", "*").split(",")
         self.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],  # Restrict for production environments
-            allow_credentials=True,
+            allow_origins=[o.strip() for o in cors_origins],
+            allow_credentials=cors_origins != ["*"],
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -154,7 +154,7 @@ class MCPAgentsAPI(FastAPI):
 
     def get_active_agents(self) -> dict[str, dict[str, Any]]:
         """Dependency for accessing the active agents registry"""
-        return self.active_agents
+        return active_agents
 
     def _setup_routers(self):
         """Register all routers from submodules"""

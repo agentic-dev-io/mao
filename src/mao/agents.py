@@ -507,7 +507,7 @@ class Supervisor:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
     )
     async def _create_supervisor_workflow(self) -> None:
         try:
@@ -520,20 +520,23 @@ class Supervisor:
                 len(external_tools),
             )
 
+            hitl_tools = _parse_hitl_tools()
             self.supervisor_agent = lc_create_agent(
                 model=self.llm,
                 tools=all_tools,
                 system_prompt=self._build_supervisor_prompt(agent_tools),
                 checkpointer=self.memory,
                 middleware=(
-                    [HumanInTheLoopMiddleware(interrupt_on=_parse_hitl_tools())]
-                    if _parse_hitl_tools()
+                    [HumanInTheLoopMiddleware(interrupt_on=hitl_tools)]
+                    if hitl_tools
                     else []
                 ),
                 state_schema=RuntimeAgentState,
                 name="global_supervisor",
             )
             self.app = self.supervisor_agent
+        except (ConnectionError, TimeoutError, OSError):
+            raise
         except Exception as e:
             logger.error("Supervisor workflow initialization failed: %s", e, exc_info=True)
             raise

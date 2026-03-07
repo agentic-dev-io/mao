@@ -2,20 +2,29 @@
 KnowledgeTree and ExperienceTree: DuckDB-based vector stores for agent knowledge and experience.
 """
 
-import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
 from typing import Any, TypedDict
 
 from typing_extensions import NotRequired
 
 import duckdb
-from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.embeddings import Embeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+
+_VALID_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+
+def _validate_identifier(name: str) -> str:
+    if not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid identifier '{name}': must match [a-zA-Z_][a-zA-Z0-9_]{{0,63}}"
+        )
+    return name
 
 DEFAULT_VECTOR_DB_PATH = "mao_vectors.duckdb"
 BATCH_SIZE: int = int(os.environ.get("VECTOR_BATCH_SIZE", "32"))
@@ -37,19 +46,20 @@ class SearchResult(TypedDict):
 class EmbeddingProvider:
     @staticmethod
     async def create_embeddings() -> tuple[Embeddings, int]:
-        fast_embed: Embeddings = FastEmbedEmbeddings(
-            model_name="BAAI/bge-small-en-v1.5", parallel=0
+        hf_embed: Embeddings = HuggingFaceEmbeddings(
+            model="BAAI/bge-small-en-v1.5",
+            model_kwargs={"device": "cpu"},
         )
-        if hasattr(fast_embed, "embedding_size") and fast_embed.embedding_size:
-            embed_dim = int(fast_embed.embedding_size)
-        elif hasattr(fast_embed, "dim") and fast_embed.dim:
-            embed_dim = int(fast_embed.dim)
+        if hasattr(hf_embed, "embedding_size") and hf_embed.embedding_size:
+            embed_dim = int(hf_embed.embedding_size)
+        elif hasattr(hf_embed, "dim") and hf_embed.dim:
+            embed_dim = int(hf_embed.dim)
         else:
-            embed_dim = len(fast_embed.embed_query("test"))
+            embed_dim = len(hf_embed.embed_query("test"))
         logging.info(
-            f"Using FastEmbed: BAAI/bge-small-en-v1.5 with dim {embed_dim}"
+            f"Using SentenceTransformers embeddings: BAAI/bge-small-en-v1.5 with dim {embed_dim}"
         )
-        return fast_embed, embed_dim
+        return hf_embed, embed_dim
 
 
 class VectorStoreError(Exception):
@@ -66,7 +76,7 @@ class VectorStoreBase:
             Callable[[], Awaitable[tuple[Embeddings, int]]] | None
         ) = None,
     ):
-        self.collection_name = collection_name
+        self.collection_name = _validate_identifier(collection_name)
         self.db_path = db_path or get_vector_db_path()
         self.recreate_on_dim_mismatch = recreate_on_dim_mismatch
         self.conn = self._get_connection(self.db_path)
@@ -164,9 +174,6 @@ class VectorStoreBase:
         except Exception as e:
             raise VectorStoreError(f"Failed to add entry: {e}") from e
 
-    def add_entry(self, text: str, tags: list[str] | None = None) -> str:
-        return asyncio.run(self.add_entry_async(text, tags))
-
     async def search_async(self, query: str, k: int = 3) -> list[SearchResult]:
         if self.embed is None:
             raise RuntimeError("Embeddings not initialized. Call async_init() first.")
@@ -197,9 +204,6 @@ class VectorStoreBase:
             logging.error(f"Search failed in '{self.collection_name}': {e}")
             return []
 
-    def search(self, query: str, k: int = 3) -> list[SearchResult]:
-        return asyncio.run(self.search_async(query, k))
-
     async def delete_entry_async(self, point_id: str) -> bool:
         try:
             self.conn.execute(
@@ -209,9 +213,6 @@ class VectorStoreBase:
         except Exception as e:
             logging.error(f"Failed to delete entry {point_id}: {e}")
             return False
-
-    def delete_entry(self, point_id: str) -> bool:
-        return asyncio.run(self.delete_entry_async(point_id))
 
     async def get_entry_async(self, point_id: str) -> dict[str, Any] | None:
         try:
@@ -232,18 +233,8 @@ class VectorStoreBase:
             logging.error(f"Error retrieving entry {point_id}: {e}")
             return None
 
-    def get_entry(self, point_id: str) -> dict[str, Any] | None:
-        return asyncio.run(self.get_entry_async(point_id))
-
     async def clear_all_points_async(self) -> None:
         self.conn.execute(f"DELETE FROM {self.collection_name}")
-
-    def clear_all_points(self) -> bool:
-        try:
-            asyncio.run(self.clear_all_points_async())
-            return True
-        except Exception:
-            return False
 
     async def add_tag_async(self, point_id: str, tag: str) -> bool:
         entry = await self.get_entry_async(point_id)
@@ -261,15 +252,9 @@ class VectorStoreBase:
             logging.error(f"Failed to add tag to {point_id}: {e}")
             return False
 
-    def add_tag(self, point_id: str, tag: str) -> bool:
-        return asyncio.run(self.add_tag_async(point_id, tag))
-
     async def get_tags_async(self, point_id: str) -> list[str]:
         entry = await self.get_entry_async(point_id)
         return entry.get("tags", []) if entry else []
-
-    def get_tags(self, point_id: str) -> list[str]:
-        return asyncio.run(self.get_tags_async(point_id))
 
     async def add_relation_async(
         self, from_id: str, to_id: str, rel_type: str = "related"
@@ -291,9 +276,6 @@ class VectorStoreBase:
                 return False
         return True
 
-    def add_relation(self, from_id: str, to_id: str, rel_type: str = "related") -> bool:
-        return asyncio.run(self.add_relation_async(from_id, to_id, rel_type))
-
     async def get_relations_async(
         self, point_id: str, rel_type: str | None = None
     ) -> list[dict[str, Any]]:
@@ -304,11 +286,6 @@ class VectorStoreBase:
         if rel_type:
             return [r for r in rels if r.get("type") == rel_type]
         return rels
-
-    def get_relations(
-        self, point_id: str, rel_type: str | None = None
-    ) -> list[dict[str, Any]]:
-        return asyncio.run(self.get_relations_async(point_id, rel_type))
 
     async def remove_relation_async(
         self, from_id: str, to_id: str, rel_type: str | None = None
@@ -337,11 +314,6 @@ class VectorStoreBase:
                 return False
         return True
 
-    def remove_relation(
-        self, from_id: str, to_id: str, rel_type: str | None = None
-    ) -> bool:
-        return asyncio.run(self.remove_relation_async(from_id, to_id, rel_type))
-
     async def add_entries_batch_async(
         self, texts: list[str], tags_list: list[list[str]] | None = None
     ) -> list[str]:
@@ -367,11 +339,6 @@ class VectorStoreBase:
             return point_ids
         except Exception as e:
             raise VectorStoreError(f"Failed to add entries in batch: {e}") from e
-
-    def add_entries_batch(
-        self, texts: list[str], tags_list: list[list[str]] | None = None
-    ) -> list[str]:
-        return asyncio.run(self.add_entries_batch_async(texts, tags_list))
 
     async def traverse_async(
         self, start_id: str, depth: int = 1, rel_types: list[str] | None = None
@@ -412,27 +379,9 @@ class VectorStoreBase:
                         queue.append((target_id, d + 1))
         return result_nodes
 
-    def traverse(
-        self, start_id: str, depth: int = 1, rel_types: list[str] | None = None
-    ) -> list[dict[str, Any]]:
-        return asyncio.run(self.traverse_async(start_id, depth, rel_types))
-
-    def add(self, text: str, tags: list[str] | None = None) -> str:
-        return self.add_entry(text, tags)
-
     async def summarize_entry_async(self, entry_id: str) -> str:
         entry = await self.get_entry_async(entry_id)
         return entry.get("text", "") if entry else ""
-
-    def summarize_entry(self, entry_id: str) -> str:
-        return asyncio.run(self.summarize_entry_async(entry_id))
-
-    @asynccontextmanager
-    async def batch_operations(self):
-        try:
-            yield self
-        finally:
-            pass
 
 
 class KnowledgeTree(VectorStoreBase):
@@ -485,16 +434,6 @@ class KnowledgeTree(VectorStoreBase):
                 )
         return exp_id
 
-    def learn_from_experience(
-        self,
-        text: str,
-        related_knowledge_id: str | None = None,
-        tags: list[str] | None = None,
-    ) -> str:
-        return asyncio.run(
-            self.learn_from_experience_async(text, related_knowledge_id, tags)
-        )
-
     async def learn_from_entry_async(self, entry_id: str, new_text: str) -> str:
         original_entry = await self.get_entry_async(entry_id)
         if not original_entry:
@@ -507,9 +446,6 @@ class KnowledgeTree(VectorStoreBase):
         await self.add_relation_async(entry_id, new_id, rel_type="learned_from_this")
         await self.add_relation_async(new_id, entry_id, rel_type="learned_this_from")
         return new_id
-
-    def learn_from_entry(self, entry_id: str, new_text: str) -> str:
-        return asyncio.run(self.learn_from_entry_async(entry_id, new_text))
 
 
 class ExperienceTree(KnowledgeTree):
