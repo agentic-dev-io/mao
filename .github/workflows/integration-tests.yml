@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
 
       - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Start Ollama container
         run: |
