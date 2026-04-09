@@ -45,7 +45,7 @@ jobs:
         run: uv run pytest --cov=src --timeout=60 -v
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit-tests
